@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "required_fields": [
+    "run_id",
+    "flow",
+    "chosen_procedure",
+    "why",
+    "skipped_phases",
+    "confidence"
+  ],
+  "confidence_values": ["low", "medium", "high"],
+  "low_confidence_action": "Ask the user to choose among the smallest set of plausible routes before execution.",
+  "privacy": [
+    "Store route reasons as short summaries, not full prompts.",
+    "Redact credentials, bearer tokens, API keys, and raw sensitive content.",
+    "Keep route records in the transition log or Plan Tree evidence only when authorized."
+  ]
+}

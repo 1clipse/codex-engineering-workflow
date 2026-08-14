@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0.0",
+  "required_fields": [
+    "flow",
+    "status",
+    "current_phase",
+    "next_phase",
+    "plan_target",
+    "terminal_condition",
+    "resume_point"
+  ],
+  "flows": ["main", "bug", "triage", "wayfinder", "maintenance", "direct"],
+  "statuses": ["active", "awaiting-user", "blocked-external", "partial", "failed", "complete", "cancelled"],
+  "phases": ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"],
+  "allowed_phase_transitions": {
+    "route": ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"],
+    "setup": ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review"],
+    "clarify": ["route", "clarify", "prototype", "spec", "tickets", "goal", "execute"],
+    "prototype": ["route", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"],
+    "spec": ["route", "clarify", "prototype", "spec", "tickets", "goal", "execute"],
+    "tickets": ["route", "clarify", "spec", "tickets", "goal", "execute"],
+    "goal": ["route", "clarify", "spec", "tickets", "goal", "execute"],
+    "execute": ["route", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review"],
+    "review": ["route", "execute", "review", "close"],
+    "close": ["close"]
+  },
+  "allowed_status_transitions": {
+    "active": ["active", "awaiting-user", "blocked-external", "partial", "failed", "complete", "cancelled"],
+    "awaiting-user": ["active", "awaiting-user", "blocked-external", "partial", "failed", "cancelled"],
+    "blocked-external": ["active", "awaiting-user", "blocked-external", "partial", "failed", "cancelled"],
+    "partial": ["active", "awaiting-user", "blocked-external", "partial", "failed", "cancelled"],
+    "failed": ["active", "failed", "cancelled"],
+    "complete": ["complete"],
+    "cancelled": ["active", "cancelled"]
+  },
+  "event_rules": {
+    "advance": {},
+    "route-selected": {
+      "status": ["active"],
+      "current_phase": ["route"]
+    },
+    "spec-not-ready": {
+      "status": ["active"],
+      "current_phase": ["clarify", "spec"]
+    },
+    "several-frontiers": {
+      "status": ["awaiting-user"],
+      "current_phase": ["tickets"]
+    },
+    "user-decision-needed": {
+      "status": ["awaiting-user"]
+    },
+    "external-blocker": {
+      "status": ["blocked-external"]
+    },
+    "partial-result": {
+      "status": ["partial"]
+    },
+    "execution-blocked": {
+      "status": ["awaiting-user"],
+      "current_phase": ["execute"]
+    },
+    "unrecoverable-failure": {
+      "status": ["failed"],
+      "next_phase": ["none"]
+    },
+    "review-p0-p1": {
+      "status": ["active"],
+      "current_phase": ["execute"],
+      "next_phase": ["review"]
+    },
+    "scope-change": {
+      "status": ["active"],
+      "current_phase": ["route"]
+    },
+    "user-cancelled": {
+      "status": ["cancelled"],
+      "next_phase": ["none"]
+    },
+    "user-resumed": {
+      "status": ["active"]
+    },
+    "terminal-verified": {
+      "status": ["complete"],
+      "current_phase": ["close"],
+      "next_phase": ["none"]
+    }
+  }
+}

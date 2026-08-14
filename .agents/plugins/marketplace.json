@@ -1,0 +1,20 @@
+{
+  "name": "codex-engineering-workflow",
+  "interface": {
+    "displayName": "Codex Engineering Workflow"
+  },
+  "plugins": [
+    {
+      "name": "delivery-control",
+      "source": {
+        "source": "local",
+        "path": "./plugins/delivery-control"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

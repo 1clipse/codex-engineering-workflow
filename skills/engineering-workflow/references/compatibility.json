@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0.0",
+  "delivery_control": {
+    "minimum_version": "1.0.0",
+    "plugin_name": "delivery-control",
+    "required_tools": ["initialize_flow", "inspect_flow", "select_route", "propose_transition", "commit_transition", "recover_flow", "project_native_plan", "confirm_native_plan", "validate_evidence", "request_authorization", "confirm_authorization", "consume_authorization", "audit_consistency", "get_metrics", "close_flow", "cancel_flow"]
+  },
+  "plan_tree": {
+    "minimum_version": "0.4.0",
+    "version_file": "plan-tree/VERSION"
+  },
+  "ask_matt": {
+    "router_file": "ask-matt/SKILL.md",
+    "phase_boundaries_file": "ask-matt/PHASE-BOUNDARIES.md",
+    "optional_host_operations": ["clear", "compact"],
+    "fallback_operation": "handoff"
+  },
+  "product_design": {
+    "plugin_name": "product-design",
+    "minimum_version": "0.1.47",
+    "router_file": "skills/index/SKILL.md",
+    "required_skills": [
+      "user-context",
+      "get-context",
+      "audit",
+      "ideate",
+      "prototype",
+      "image-to-code",
+      "url-to-code",
+      "design-qa"
+    ]
+  }
+}

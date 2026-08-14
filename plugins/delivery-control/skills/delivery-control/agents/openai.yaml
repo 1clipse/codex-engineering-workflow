@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delivery Control"
+  short_description: "Audit, recover, authorize, and close delivery flows"
+  default_prompt: "Use $delivery-control to inspect this delivery flow, reconcile its Plan Tree and transaction state, and report the next safe action."

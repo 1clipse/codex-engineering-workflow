@@ -1,0 +1,4 @@
+interface:
+  display_name: "Engineering Workflow"
+  short_description: "Route engineering and product design through delivery"
+  default_prompt: "Use $engineering-workflow to route this repository task, transact durable state through Delivery Control, apply the selected Matt and Product Design procedures, and continue until every completion gate passes or a concrete user-owned blocker remains."

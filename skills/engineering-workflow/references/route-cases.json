@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0.0",
+  "cases": [
+    {
+      "name": "clear-small-feature",
+      "request": "Implement a small, fully specified repository feature and verify it.",
+      "expected_flow": "main",
+      "expected_route": ["route", "execute", "review", "close"],
+      "pause": "none",
+      "completion_gate": "tests and review pass against the fixed point"
+    },
+    {
+      "name": "hard-regression",
+      "request": "A previously working behavior is intermittently failing; diagnose and fix it.",
+      "expected_flow": "bug",
+      "expected_route": ["route", "execute", "review", "close"],
+      "pause": "only for a user-owned decision or authority",
+      "completion_gate": "a tight reproducer, regression test, fix, and review evidence exist"
+    },
+    {
+      "name": "underspecified-feature",
+      "request": "Build a feature whose product behavior and acceptance rules are unresolved.",
+      "expected_flow": "main",
+      "expected_route": ["route", "clarify", "spec", "execute", "review", "close"],
+      "pause": "awaiting-user at the smallest unresolved product frontier",
+      "completion_gate": "approved acceptance criteria and implementation evidence exist"
+    },
+    {
+      "name": "parallel-delivery",
+      "request": "Deliver a large feature across independent tickets and several sessions.",
+      "expected_flow": "main",
+      "expected_route": ["route", "clarify", "spec", "tickets", "goal", "execute", "review", "close"],
+      "pause": "awaiting-user when several frontier tickets are simultaneously eligible",
+      "completion_gate": "every selected ticket and the aggregate terminal condition are verified"
+    },
+    {
+      "name": "new-visual-direction",
+      "request": "Redesign and implement a repository UI with no selected visual target.",
+      "expected_flow": "main",
+      "expected_route": ["route", "prototype", "spec", "execute", "review", "close"],
+      "pause": "awaiting-user after exactly three visual directions",
+      "completion_gate": "a selected target, passing design-qa, engineering tests, and code review exist"
+    },
+    {
+      "name": "visual-audit-only",
+      "request": "Audit the usability and accessibility of an existing product flow without implementing changes.",
+      "expected_flow": "direct",
+      "expected_route": ["route", "close"],
+      "pause": "none unless source access or user-owned context is missing",
+      "completion_gate": "the audit findings are tied to captured evidence"
+    },
+    {
+      "name": "planning-maintenance",
+      "request": "Update decisions and evidence in an existing plan without repository delivery.",
+      "expected_flow": "maintenance",
+      "expected_route": ["route", "close"],
+      "pause": "none",
+      "completion_gate": "route directly to plan-tree outside engineering-workflow"
+    },
+    {
+      "name": "production-release",
+      "request": "Prepare and deploy a verified change to production.",
+      "expected_flow": "main",
+      "expected_route": ["route", "spec", "execute", "review", "close"],
+      "pause": "awaiting-user before deployment unless exact authority already exists",
+      "completion_gate": "deployment authority and observed production result are recorded"
+    }
+  ]
+}

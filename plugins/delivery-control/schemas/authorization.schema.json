@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Single-use authorization receipt",
+  "type": "object",
+  "required": ["authorization_id", "flow_id", "action", "target", "environment", "request_digest", "expires_at", "nonce"],
+  "properties": {
+    "authorization_id": {"type": "string", "minLength": 1},
+    "flow_id": {"type": "string", "minLength": 1},
+    "action": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1},
+    "environment": {"type": "string", "minLength": 1},
+    "request_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "nonce": {"type": "string", "minLength": 16},
+    "confirmed_by": {"type": ["string", "null"]},
+    "confirmed_at": {"type": ["string", "null"], "format": "date-time"},
+    "consumed_at": {"type": ["string", "null"], "format": "date-time"}
+  }
+}

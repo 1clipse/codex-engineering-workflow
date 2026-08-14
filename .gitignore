@@ -1,0 +1,10 @@
+node_modules/
+.codex/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+.DS_Store
+Thumbs.db
+coverage/
+tmp/

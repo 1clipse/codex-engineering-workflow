@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Delivery Control flow state",
+  "type": "object",
+  "required": ["flow_id", "revision", "flow", "status", "current_phase", "next_phase", "plan_target", "terminal_condition", "resume_point"],
+  "properties": {
+    "flow_id": {"type": "string", "minLength": 1},
+    "revision": {"type": "integer", "minimum": 0},
+    "flow": {"enum": ["main", "bug", "triage", "wayfinder", "maintenance", "direct"]},
+    "status": {"enum": ["active", "awaiting-user", "blocked-external", "partial", "failed", "complete", "cancelled"]},
+    "current_phase": {"enum": ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"]},
+    "next_phase": {"oneOf": [{"enum": ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"]}, {"const": "none"}]},
+    "plan_target": {"type": "string"},
+    "terminal_condition": {"type": "string", "minLength": 1},
+    "resume_point": {"type": "string", "minLength": 1}
+  }
+}

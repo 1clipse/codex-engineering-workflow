@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "delivery-control": {
+      "command": "node",
+      "args": ["./dist/server.mjs"],
+      "cwd": "."
+    }
+  }
+}

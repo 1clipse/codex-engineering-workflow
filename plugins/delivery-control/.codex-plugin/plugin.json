@@ -1,0 +1,27 @@
+{
+  "name": "delivery-control",
+  "version": "1.0.0",
+  "description": "Local transactional delivery control for Codex engineering workflows.",
+  "author": {
+    "name": "1clipse",
+    "url": "https://github.com/1clipse/codex-engineering-workflow"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Delivery Control",
+    "shortDescription": "Audit, recover, authorize, and close delivery flows",
+    "longDescription": "Adds a local-only MCP controller for Plan Tree transactions, crash recovery, scoped authorization, evidence gates, and Codex native Plan synchronization.",
+    "developerName": "1clipse",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $delivery-control to audit the active delivery flow.",
+      "Use $delivery-control to recover this flow and report drift.",
+      "Use $delivery-control to inspect completion and authorization gates."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

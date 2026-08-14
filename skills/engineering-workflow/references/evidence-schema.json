@@ -1,0 +1,12 @@
+{
+  "schema_version": "2.0.0",
+  "allowed_results": ["passed", "verified", "accepted", "observed"],
+  "required_fields": ["evidence_id", "acceptance_ids", "type", "result", "artifact", "artifact_digest", "command_or_request_id", "observed_at", "producer", "environment"],
+  "digest_format": "sha256:<64 lowercase hexadecimal characters>",
+  "rules": [
+    "Every evidence item binds at least one stable acceptance_id.",
+    "The artifact must exist and match artifact_digest at validation time.",
+    "Expired, failed, legacy-unverified, or superseded evidence cannot satisfy a completion gate.",
+    "Store paths, digests and request IDs, never credentials, tokens, raw prompts or sensitive payloads."
+  ]
+}
