@@ -4,7 +4,7 @@
 
 它不是传统 Plan Mode 的替代品，而是将短期计划、长期计划树、具体工程流程和事务控制组合成一条可验证的交付链路。
 
-![Engineering Workflow](assets/engineering-workflow-flowchart-landscape.png)
+![Engineering Workflow](assets/engineering-workflow-flowchart.png)
 
 ## 核心能力
 
