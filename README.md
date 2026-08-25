@@ -4,7 +4,13 @@
 
 它不是传统 Plan Mode 的替代品，而是将短期计划、长期计划树、具体工程流程和事务控制组合成一条可验证的交付链路。
 
-![Engineering Workflow](assets/engineering-workflow-flowchart.png)
+## 工作流总览
+
+下面是当前 `engineering-workflow 2.0` 的交付流程总览，展示从需求路由到终态门禁、授权和恢复的完整路径。
+
+[![Engineering Workflow 2.0 交付流程](assets/engineering-workflow-v2-flowchart.visual-check.1440x900.light.png)](assets/engineering-workflow-v2-flowchart.html)
+
+点击流程图可打开可交互版本，支持浅色/深色主题、路径查看和导出。
 
 ## 核心能力
 
@@ -16,8 +22,11 @@
 - 对 commit、push、PR、merge、deploy、生产操作和外部通信采用精确、短期、单次授权。
 - 通过高层入口隐藏普通流程中的 CAS、lease、Plan projection 和 evidence 事务细节。
 - required phase 由统一策略控制：`spec` 只有在批准的 imported spec 下可跳过，`execute`/`review` 不可静默绕过；scope rework 会复用历史已完成阶段。
+- 每次 scope revision 都创建新的 `delivery_generation` 和 fixed point；旧 spec、实现、Review 与 evidence 继续可审计，但不能关闭新一代交付。
 - Review finding 按 ID 追加或更新，不能通过空列表清除；P0/P1 必须 `fixed` 且有 `reverified_by` 才能关闭。
 - 授权同时保留外部动作 digest 与控制器 mutation digest，旧 SQLite schema 会自动迁移，事务备份保存在专用目录并限制保留数量。
+- 外部动作把“已授权”和“已成功”分开验证：每次授权只允许一个结果，失败重试必须重新授权，并以本地回执 artifact/digest 证明结果。
+- 路线策略、运行时常量、JSON Schema 与 workflow 引用由一个 canonical policy 生成，并由 drift check 阻止副本分叉。
 
 ## 组件关系
 
@@ -91,10 +100,13 @@ $delivery-control 审计当前 flow，检查漂移和未满足的验收项
 
 ```text
 start_or_resume_flow       # 初始化或恢复
-advance_flow               # 推进阶段并生成 native Plan projection
+select_route               # 选择控制器内置路线模板
+advance_phase              # 按模板推进并生成 native Plan projection
+revise_scope               # 新建交付代际并清空旧 fixed point
 record_delivery_evidence  # 记录证据并返回当前门禁
 record_review_findings     # 记录 Review disposition
-close_verified_flow        # 通过全部门禁后关闭
+record_external_action_result # 记录授权动作的成功或失败
+close_flow                 # 通过全部门禁后关闭
 ```
 
 ## 验证
@@ -104,6 +116,7 @@ close_verified_flow        # 通过全部门禁后关闭
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\skills\engineering-workflow\scripts\test-state.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\skills\engineering-workflow\scripts\test-upgrades.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\skills\engineering-workflow\scripts\test-validate.ps1
 
 Set-Location .\plugins\delivery-control
 npm ci
