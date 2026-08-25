@@ -53,8 +53,9 @@
       "name": "planning-maintenance",
       "request": "Update decisions and evidence in an existing plan without repository delivery.",
       "expected_flow": "maintenance",
-      "expected_route": ["route", "close"],
+      "expected_route": ["route"],
       "pause": "none",
+      "delegated_to": "plan-tree",
       "completion_gate": "route directly to plan-tree outside engineering-workflow"
     },
     {

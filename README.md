@@ -12,8 +12,12 @@
 - 读取并应用 Ask Matt 的 procedure manual，完成澄清、spec、tickets、goal、TDD 和 review 等阶段。
 - 以 Plan Tree 作为唯一持久业务权威，保存范围、决策、阶段、证据与恢复点。
 - 通过 Delivery Control MCP 管理事务、CAS revision、lease、崩溃恢复、漂移检测和 native Plan 同步。
-- 以结构化 evidence 和 terminal condition 作为完成门禁，阶段完成不等于交付完成。
+- 以结构化 evidence、terminal observation、Review disposition 和 terminal condition 作为完成门禁，阶段完成不等于交付完成。
 - 对 commit、push、PR、merge、deploy、生产操作和外部通信采用精确、短期、单次授权。
+- 通过高层入口隐藏普通流程中的 CAS、lease、Plan projection 和 evidence 事务细节。
+- required phase 由统一策略控制：`spec` 只有在批准的 imported spec 下可跳过，`execute`/`review` 不可静默绕过；scope rework 会复用历史已完成阶段。
+- Review finding 按 ID 追加或更新，不能通过空列表清除；P0/P1 必须 `fixed` 且有 `reverified_by` 才能关闭。
+- 授权同时保留外部动作 digest 与控制器 mutation digest，旧 SQLite schema 会自动迁移，事务备份保存在专用目录并限制保留数量。
 
 ## 组件关系
 
@@ -83,6 +87,16 @@ $plan-tree 更新当前路线图和未决问题
 $delivery-control 审计当前 flow，检查漂移和未满足的验收项
 ```
 
+普通交付优先使用这些高层 MCP 工具：
+
+```text
+start_or_resume_flow       # 初始化或恢复
+advance_flow               # 推进阶段并生成 native Plan projection
+record_delivery_evidence  # 记录证据并返回当前门禁
+record_review_findings     # 记录 Review disposition
+close_verified_flow        # 通过全部门禁后关闭
+```
+
 ## 验证
 
 仓库内可独立运行的测试：
@@ -102,7 +116,9 @@ npm run check
 
 `delivery-control` 通过本地 stdio MCP 运行，不监听网络端口。运行状态默认保存在 `~/.codex/state/delivery-control/delivery-control.sqlite`，不会包含在本仓库或插件升级包中。
 
-控制器不会替用户执行 commit、push、PR、merge、deploy、生产变更或外部消息；它只记录并验证这些动作是否持有匹配的授权。它是交付协议控制层，不是 Codex 宿主级安全沙箱。
+Plan Tree 投影产生的恢复备份位于目标目录下的 `.delivery-control-backups/`，默认最多保留最近 5 份；SQLite schema 会在插件启动时执行受控迁移，不需要删除现有状态库。
+
+控制器不会替用户执行 commit、push、PR、merge、deploy、生产变更或外部消息；它只记录并验证这些动作是否持有匹配的授权。外部动作的授权必须同时匹配 action、target、environment 和精确 request digest。它是交付协议控制层，不是 Codex 宿主级安全沙箱。
 
 ## 特别鸣谢 / Special Thanks
 

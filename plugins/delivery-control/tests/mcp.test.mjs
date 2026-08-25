@@ -29,9 +29,9 @@ test("bundled stdio MCP exposes the complete stable tool surface", async () => {
     const listed = await client.listTools();
     const names = listed.tools.map((tool) => tool.name).sort();
     const expected = [
-      "audit_consistency", "cancel_flow", "close_flow", "commit_transition", "confirm_authorization",
-      "confirm_native_plan", "consume_authorization", "get_metrics", "initialize_flow", "inspect_flow",
-      "project_native_plan", "propose_transition", "recover_flow", "request_authorization", "select_route", "validate_evidence"
+      "advance_flow", "audit_consistency", "cancel_flow", "close_flow", "close_verified_flow", "commit_transition", "confirm_authorization",
+      "confirm_native_plan", "consume_authorization", "get_metrics", "initialize_flow", "inspect_flow", "project_native_plan", "propose_transition",
+      "record_delivery_evidence", "record_review_findings", "recover_flow", "request_authorization", "resolve_drift", "select_route", "start_or_resume_flow", "validate_evidence"
     ].sort();
     assert.deepEqual(names, expected);
     for (const tool of listed.tools) {

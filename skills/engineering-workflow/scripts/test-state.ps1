@@ -49,7 +49,7 @@ try {
     Assert-Case 'failed state needs explicit resume event' (Invoke-State 'implicit resume' $resumed 'advance' $failed) 1 "requires event 'user-resumed'"
     Assert-Case 'explicit failed resume' (Invoke-State 'explicit resume' $resumed 'user-resumed' $failed) 0 'PASS: workflow state is valid'
 
-    $complete = Write-State 'complete' @{ flow='main'; status='complete'; current_phase='close'; next_phase='none'; plan_target='plan-1'; terminal_condition='tests pass'; resume_point='closed' }
+    $complete = Write-State 'complete' @{ flow='main'; status='complete'; current_phase='close'; next_phase='none'; plan_target='plan-1'; terminal_condition='tests pass'; resume_point='closed'; route=@{ skipped_phases=@('setup','prototype','tickets','goal'); approved_spec=$false }; history=@(@{ new_phase='clarify' },@{ new_phase='spec' },@{ new_phase='execute' },@{ new_phase='review' }); terminal_observation=@{ evidence_id='E-1'; artifact='test-receipt.json'; artifact_digest=('sha256:' + ('0' * 64)); observed_at='2026-08-13T00:00:00Z'; result='passed' }; review_findings=@() }
     Assert-Case 'complete requires evidence' (Invoke-State 'complete without evidence' $complete 'terminal-verified') 1 'requires a structured evidence file'
     $evidencePath = Join-Path $tempRoot 'evidence.json'
     [IO.File]::WriteAllText($evidencePath, '[{"evidence_id":"E-1","acceptance_ids":["AC-1"],"type":"test","result":"passed","artifact":"test-receipt.json","artifact_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","command_or_request_id":"test","observed_at":"2026-08-13T00:00:00Z","producer":"test","environment":"local"}]', (New-Object Text.UTF8Encoding($false)))

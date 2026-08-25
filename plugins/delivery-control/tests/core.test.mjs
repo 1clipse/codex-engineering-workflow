@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DeliveryControl, sha256 } from "../src/core.mjs";
@@ -98,6 +99,22 @@ test("external Plan Tree edit freezes the flow", () => {
   fx.controller.close();
 });
 
+test("explicit restored Plan Tree resolution clears a freeze", () => {
+  const fx = fixture();
+  const original = readFileSync(fx.target, "utf8");
+  writeFileSync(fx.target, `${original}\nexternal edit\n`);
+  const drift = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 0, event: "advance", reason: "move", patch: { current_phase: "spec" } });
+  assert.equal(drift.error.code, "plan_tree_drift");
+  writeFileSync(fx.target, original);
+  const resolved = fx.controller.resolveDrift({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("resolve-restored"), resolution: "accept-restored-plan-tree", reason: "User confirmed the restored Plan Tree digest" });
+  assert.equal(resolved.ok, true, JSON.stringify(resolved));
+  assert.equal(resolved.flow.frozen, false);
+  assert.equal(resolved.flow.status, "active");
+  const moved = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 0, event: "advance", reason: "resume", patch: { current_phase: "spec" } });
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+  fx.controller.close();
+});
+
 test("database can rebuild from Plan Tree", () => {
   const fx = fixture();
   fx.controller.close();
@@ -146,13 +163,16 @@ test("authorization is scoped, expires, and cannot be replayed", () => {
   const requestDigest = sha256("push-request");
   const requested = fx.controller.requestAuthorization({ flow_id: "flow-1", expected_revision: 0, action: "push", target: "origin/main", environment: "github", request_digest: requestDigest, elicitation_supported: false });
   assert.equal(requested.ok, true);
+  assert.notEqual(requested.control_request_digest, requestDigest);
   assert.equal(fx.controller.confirmAuthorization({ flow_id: "flow-1", expected_revision: 0, request_digest: requestDigest, authorization_id: requested.authorization_id, mode: "challenge", challenge_code: "BAD" }).error.code, "challenge_mismatch");
   const confirmed = fx.controller.confirmAuthorization({ flow_id: "flow-1", expected_revision: 0, request_digest: requestDigest, authorization_id: requested.authorization_id, mode: "challenge", challenge_code: requested.confirmation.challenge_code });
   assert.equal(confirmed.ok, true);
+  assert.notEqual(confirmed.control_request_digest, requestDigest);
   const mismatch = fx.controller.consumeAuthorization({ flow_id: "flow-1", expected_revision: 0, authorization_id: requested.authorization_id, action: "merge", target: "origin/main", environment: "github", request_digest: requestDigest });
   assert.equal(mismatch.error.code, "authorization_scope_mismatch");
   const consumed = fx.controller.consumeAuthorization({ flow_id: "flow-1", expected_revision: 0, authorization_id: requested.authorization_id, action: "push", target: "origin/main", environment: "github", request_digest: requestDigest });
   assert.equal(consumed.ok, true);
+  assert.notEqual(consumed.receipt.control_request_digest, requestDigest);
   const replay = fx.controller.consumeAuthorization({ flow_id: "flow-1", expected_revision: 1, authorization_id: requested.authorization_id, action: "push", target: "origin/main", environment: "github", request_digest: requestDigest });
   assert.equal(replay.error.code, "authorization_replayed");
   const expiring = fx.controller.requestAuthorization({ flow_id: "flow-1", expected_revision: 1, action: "deploy", target: "app", environment: "prod", request_digest: sha256("deploy"), ttl_ms: 10, elicitation_supported: false });
@@ -173,7 +193,11 @@ test("close gate requires evidence, terminal observation, and native Plan status
   }}).ok, true);
   const projection = fx.controller.projectNativePlan({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("project") });
   assert.equal(fx.controller.confirmNativePlan({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("confirm"), projection_id: projection.projection_id, projection_revision: projection.projection_revision, applied_steps: projection.plan.steps }).ok, true);
-  const closed = fx.controller.closeFlow({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("close"), terminal_observed: true });
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("spec"), event: "advance", reason: "spec completed", patch: { current_phase: "spec", next_phase: "execute" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 3, request_digest: sha256("execute"), event: "advance", reason: "execute completed", patch: { current_phase: "execute", next_phase: "review" } }).ok, true);
+  const reviewed = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 4, request_digest: sha256("review"), event: "advance", reason: "review completed", patch: { current_phase: "review", next_phase: "close" } });
+  assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
+  const closed = fx.controller.closeFlow({ flow_id: "flow-1", expected_revision: 5, request_digest: sha256("close"), terminal_observation: { evidence_id: "E-1", artifact, artifact_digest: sha256(readFileSync(artifact)), observed_at: new Date().toISOString(), result: "verified" } });
   assert.equal(closed.ok, true, JSON.stringify(closed));
   assert.equal(closed.flow.status, "complete");
   fx.controller.close();
@@ -182,11 +206,133 @@ test("close gate requires evidence, terminal observation, and native Plan status
 test("state machine rejects illegal phase and event transitions", () => {
   const fx = fixture();
   const review = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("to-review"), event: "advance", reason: "review", patch: { current_phase: "review", next_phase: "close" } });
-  assert.equal(review.ok, true);
-  const illegal = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("illegal"), event: "advance", reason: "bad", patch: { current_phase: "spec" } });
+  assert.equal(review.error.code, "execute_required");
+  const spec = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("spec"), event: "advance", reason: "spec", patch: { current_phase: "spec", next_phase: "execute" } });
+  assert.equal(spec.ok, true);
+  const illegal = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("illegal"), event: "advance", reason: "bad", patch: { current_phase: "close" } });
   assert.equal(illegal.error.code, "illegal_phase_transition");
   const eventRule = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("event"), event: "spec-not-ready", reason: "bad", patch: { current_phase: "execute" } });
   assert.equal(eventRule.error.code, "event_rule_violation");
+  fx.controller.close();
+});
+
+test("new flows cannot bypass spec before execute", () => {
+  const fx = fixture();
+  const bypass = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("bypass-spec"), event: "advance", reason: "skip spec", patch: { current_phase: "execute", next_phase: "review" } });
+  assert.equal(bypass.error.code, "spec_required");
+  const route = fx.controller.selectRoute({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("route-for-skip"), chosen_procedure: "implement", why: "test route", skipped_phases: [], confidence: "high" });
+  assert.equal(route.ok, true, JSON.stringify(route));
+  const undeclared = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("undeclared-skip"), event: "advance", reason: "skip clarify", patch: { current_phase: "spec", next_phase: "execute" } });
+  assert.equal(undeclared.error.code, "phase_skip_not_declared");
+  fx.controller.close();
+});
+
+test("required phases cannot be skipped or bypassed through review", () => {
+  const fx = fixture();
+  const skipped = fx.controller.selectRoute({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("skip-required"), chosen_procedure: "implement", why: "bad route", skipped_phases: ["spec"], confidence: "high" });
+  assert.equal(skipped.error.code, "required_phase_skipped");
+  const bypass = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("review-bypass"), event: "advance", reason: "skip execution", patch: { current_phase: "review", next_phase: "close" } });
+  assert.equal(bypass.error.code, "execute_required");
+  fx.controller.close();
+});
+
+test("completed phases remain valid after a scope rework loop", () => {
+  const fx = fixture();
+  const route = fx.controller.selectRoute({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("rework-route"), chosen_procedure: "implement", why: "rework test", skipped_phases: ["prototype", "tickets", "goal"], confidence: "high" });
+  assert.equal(route.ok, true, JSON.stringify(route));
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("rework-clarify"), event: "advance", reason: "clarify", patch: { current_phase: "clarify", next_phase: "spec" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("rework-spec"), event: "advance", reason: "spec", patch: { current_phase: "spec", next_phase: "execute" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 3, request_digest: sha256("rework-execute"), event: "advance", reason: "execute", patch: { current_phase: "execute", next_phase: "review" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 4, request_digest: sha256("rework-scope"), event: "advance", reason: "scope changed", patch: { current_phase: "clarify", next_phase: "execute" } }).ok, true);
+  const repeated = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 5, request_digest: sha256("rework-repeat"), event: "advance", reason: "resume execute", patch: { current_phase: "execute", next_phase: "review" } });
+  assert.equal(repeated.ok, true, JSON.stringify(repeated));
+  fx.controller.close();
+});
+
+test("review findings cannot be silently removed and P0/P1 require reverification", () => {
+  const fx = fixture({ criteria: [], types: [] });
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("review-spec"), event: "advance", reason: "spec", patch: { current_phase: "spec", next_phase: "execute" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("review-execute"), event: "advance", reason: "execute", patch: { current_phase: "execute", next_phase: "review" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("review-phase"), event: "advance", reason: "review", patch: { current_phase: "review", next_phase: "close" } }).ok, true);
+  assert.equal(fx.controller.recordReviewFindings({ flow_id: "flow-1", expected_revision: 3, request_digest: sha256("review-findings"), review_findings: [{ finding_id: "F-P1", severity: "P1", disposition: "open" }] }).ok, true);
+  const removed = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 4, request_digest: sha256("remove-finding"), event: "advance", reason: "bad removal", patch: { review_findings: [], current_phase: "review", next_phase: "close" } });
+  assert.equal(removed.error.code, "review_finding_removed");
+  const p0 = fx.controller.closeFlow({ flow_id: "flow-1", expected_revision: 4, request_digest: sha256("p0-close"), terminal_observation: null });
+  assert.equal(p0.error.code, "completion_gate_failed");
+  assert.equal(p0.error.unmet_criteria.some((item) => item.kind === "review-reverification"), true);
+  fx.controller.close();
+});
+
+test("transaction backups are bounded and isolated", () => {
+  const fx = fixture({ criteria: [], types: [] });
+  for (let index = 0; index < 8; index += 1) {
+    const result = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: index, request_digest: sha256(`backup-${index}`), event: "advance", reason: "backup retention", patch: { current_phase: index === 0 ? "spec" : "spec", next_phase: "execute" } });
+    assert.equal(result.ok, true, JSON.stringify(result));
+  }
+  const backupDir = join(fx.root, ".delivery-control-backups");
+  assert.equal(existsSync(backupDir), true);
+  assert.ok(readdirSync(backupDir).filter((name) => name.endsWith(".bak")).length <= 5);
+  assert.equal(readdirSync(fx.root).some((name) => name.endsWith(".bak")), false);
+  fx.controller.close();
+});
+
+test("schema version 1 databases migrate authorization digest columns", () => {
+  const root = mkdtempSync(join(tmpdir(), "delivery-control-migrate-"));
+  roots.push(root);
+  const dbPath = join(root, "legacy.sqlite");
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec("CREATE TABLE schema_meta(version INTEGER NOT NULL); INSERT INTO schema_meta VALUES(1); CREATE TABLE authorizations (authorization_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, environment TEXT NOT NULL, request_digest TEXT NOT NULL, expires_at TEXT NOT NULL, nonce TEXT NOT NULL UNIQUE, challenge_digest TEXT NOT NULL, confirmed_by TEXT, confirmed_at TEXT, consumed_at TEXT, created_at TEXT NOT NULL);");
+  legacy.close();
+  const controller = new DeliveryControl({ dbPath });
+  const probe = new DatabaseSync(dbPath);
+  const columns = probe.prepare("PRAGMA table_info(authorizations)").all().map((column) => column.name);
+  const version = probe.prepare("SELECT version FROM schema_meta").get().version;
+  probe.close();
+  assert.equal(version, 2);
+  assert.ok(columns.includes("control_request_digest"));
+  assert.ok(columns.includes("consumed_request_digest"));
+  controller.close();
+});
+
+test("low-confidence route waits for explicit confirmation", () => {
+  const fx = fixture();
+  const pending = fx.controller.selectRoute({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("low-route"), chosen_procedure: "implement", why: "two procedures fit", skipped_phases: [], confidence: "low" });
+  assert.equal(pending.ok, true, JSON.stringify(pending));
+  assert.equal(pending.flow.status, "awaiting-user");
+  assert.equal(pending.flow.next_phase, "route");
+  const confirmed = fx.controller.selectRoute({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("confirm-route"), chosen_procedure: "implement", why: "user selected", skipped_phases: [], confidence: "low", confirmed: true });
+  assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
+  assert.equal(confirmed.flow.status, "active");
+  fx.controller.close();
+});
+
+test("high-level flow operations return projections and evidence gates", () => {
+  const fx = fixture();
+  const started = fx.controller.startOrResumeFlow({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("resume"), plan_root: fx.root, plan_target: fx.target, terminal_condition: "All acceptance evidence is verified", resume_point: "route" });
+  assert.equal(started.ok, true, JSON.stringify(started));
+  const advanced = fx.controller.advanceFlow({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("advance-high-level"), event: "advance", reason: "enter spec", patch: { current_phase: "spec", next_phase: "execute" } });
+  assert.equal(advanced.ok, true, JSON.stringify(advanced));
+  assert.equal(advanced.native_plan_projection.ok, true);
+  const artifact = join(fx.root, "relative-proof.txt");
+  writeFileSync(artifact, "relative");
+  const evidence = fx.controller.recordDeliveryEvidence({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("relative-evidence"), evidence: { evidence_id: "E-relative", acceptance_ids: ["AC-1"], type: "test", result: "verified", artifact: "relative-proof.txt", artifact_digest: sha256(readFileSync(artifact)), command_or_request_id: "relative-test", observed_at: new Date().toISOString(), producer: "test", environment: "local" }});
+  assert.equal(evidence.ok, true, JSON.stringify(evidence));
+  assert.equal(evidence.flow.evidence_records[0].artifact, artifact);
+  fx.controller.close();
+});
+
+test("review disposition is a completion gate", () => {
+  const fx = fixture({ criteria: [], types: [] });
+  assert.equal(fx.controller.markNativePlanUnavailable({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("review-gate-unavailable"), handoff: "native Plan unavailable" }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("review-gate-spec"), event: "advance", reason: "spec", patch: { current_phase: "spec", next_phase: "execute" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("review-gate-execute"), event: "advance", reason: "execute", patch: { current_phase: "execute", next_phase: "review" } }).ok, true);
+  const reviewed = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 3, request_digest: sha256("review-gate-phase"), event: "advance", reason: "review", patch: { current_phase: "review", next_phase: "close" } });
+  assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
+  const findings = fx.controller.recordReviewFindings({ flow_id: "flow-1", expected_revision: 4, request_digest: sha256("review-findings"), review_findings: [{ finding_id: "F-1", severity: "P1", disposition: "fixed", reason: "patched" }] });
+  assert.equal(findings.ok, true, JSON.stringify(findings));
+  const blocked = fx.controller.closeFlow({ flow_id: "flow-1", expected_revision: 5, request_digest: sha256("review-gate-close"), terminal_observed: true });
+  assert.equal(blocked.error.code, "completion_gate_failed");
+  assert.equal(blocked.error.unmet_criteria.some((item) => item.kind === "review-reverification"), true);
   fx.controller.close();
 });
 
@@ -221,16 +367,23 @@ test("superseded evidence is retained but does not block closure", () => {
 });
 
 test("close gate requires consumed receipts for declared external actions", () => {
-  const fx = fixture({ criteria: [], types: [], actions: [{ action: "deploy", target: "app", environment: "prod" }] });
+  const requestDigest = sha256("deploy-exact");
+  const fx = fixture({ criteria: [], types: [], actions: [{ action: "deploy", target: "app", environment: "prod", request_digest: requestDigest }] });
   assert.equal(fx.controller.markNativePlanUnavailable({ flow_id: "flow-1", expected_revision: 0, request_digest: sha256("unavailable"), handoff: "native Plan unavailable" }).ok, true);
   const blocked = fx.controller.closeFlow({ flow_id: "flow-1", expected_revision: 1, request_digest: sha256("close-before-auth"), terminal_observed: true });
   assert.equal(blocked.error.code, "completion_gate_failed");
   assert.equal(blocked.error.unmet_criteria.some((item) => item.kind === "authorization"), true);
-  const requestDigest = sha256("deploy-exact");
   const requested = fx.controller.requestAuthorization({ flow_id: "flow-1", expected_revision: 1, action: "deploy", target: "app", environment: "prod", request_digest: requestDigest, elicitation_supported: false });
   assert.equal(fx.controller.confirmAuthorization({ flow_id: "flow-1", expected_revision: 1, request_digest: requestDigest, authorization_id: requested.authorization_id, mode: "challenge", challenge_code: requested.confirmation.challenge_code }).ok, true);
   assert.equal(fx.controller.consumeAuthorization({ flow_id: "flow-1", expected_revision: 1, authorization_id: requested.authorization_id, action: "deploy", target: "app", environment: "prod", request_digest: requestDigest }).ok, true);
-  const closed = fx.controller.closeFlow({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("close-after-auth"), terminal_observed: true });
+  const terminal = join(fx.root, "terminal.txt");
+  writeFileSync(terminal, "terminal");
+  assert.equal(fx.controller.addEvidence({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("terminal-evidence"), evidence: { evidence_id: "E-terminal", acceptance_ids: ["terminal"], type: "terminal", result: "observed", artifact: terminal, artifact_digest: sha256(readFileSync(terminal)), command_or_request_id: "terminal", observed_at: new Date().toISOString(), producer: "test", environment: "local" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 3, request_digest: sha256("spec-after-auth"), event: "advance", reason: "spec completed", patch: { current_phase: "spec", next_phase: "execute" } }).ok, true);
+  assert.equal(fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 4, request_digest: sha256("execute-after-auth"), event: "advance", reason: "execute completed", patch: { current_phase: "execute", next_phase: "review" } }).ok, true);
+  const reviewed = fx.controller.commitTransition({ flow_id: "flow-1", expected_revision: 5, request_digest: sha256("review-after-auth"), event: "advance", reason: "review completed", patch: { current_phase: "review", next_phase: "close" } });
+  assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
+  const closed = fx.controller.closeFlow({ flow_id: "flow-1", expected_revision: 6, request_digest: sha256("close-after-auth"), terminal_observation: { evidence_id: "E-terminal", artifact: terminal, artifact_digest: sha256(readFileSync(terminal)), observed_at: new Date().toISOString(), result: "observed" } });
   assert.equal(closed.ok, true, JSON.stringify(closed));
   fx.controller.close();
 });
@@ -255,7 +408,12 @@ test("Plan Tree rebuild preserves evidence and native Plan completion gates", ()
   assert.equal(recovered.flow.revision, 2);
   assert.equal(recovered.flow.evidence_records.length, 1);
   assert.equal(recovered.flow.plan_sync, "confirmed");
-  const closed = rebuilt.closeFlow({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("durable-close"), terminal_observed: true });
+  assert.equal(rebuilt.commitTransition({ flow_id: "flow-1", expected_revision: 2, request_digest: sha256("durable-spec"), event: "advance", reason: "spec completed", patch: { current_phase: "spec", next_phase: "execute" } }).ok, true);
+  assert.equal(rebuilt.commitTransition({ flow_id: "flow-1", expected_revision: 3, request_digest: sha256("durable-execute"), event: "advance", reason: "execute completed", patch: { current_phase: "execute", next_phase: "review" } }).ok, true);
+  const reviewed = rebuilt.commitTransition({ flow_id: "flow-1", expected_revision: 4, request_digest: sha256("durable-review"), event: "advance", reason: "review completed", patch: { current_phase: "review", next_phase: "close" } });
+  assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
+  const evidenceArtifact = artifact;
+  const closed = rebuilt.closeFlow({ flow_id: "flow-1", expected_revision: 5, request_digest: sha256("durable-close"), terminal_observation: { evidence_id: "E-durable", artifact: evidenceArtifact, artifact_digest: sha256(readFileSync(evidenceArtifact)), observed_at: new Date().toISOString(), result: "verified" } });
   assert.equal(closed.ok, true, JSON.stringify(closed));
   rebuilt.close();
 });

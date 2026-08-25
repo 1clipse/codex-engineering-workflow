@@ -8,3 +8,5 @@ node_modules/
 Thumbs.db
 coverage/
 tmp/
+.delivery-control-backups/
+*.delivery-control.tmp

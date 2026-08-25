@@ -21,6 +21,8 @@ For non-trivial unforced delivery, read `../ask-matt/SKILL.md` and apply its sel
 
 Use the `delivery-control` MCP server for every durable flow. On a new flow, call `initialize_flow` against an existing Plan Tree current-state file. Declare stable acceptance IDs, required evidence types, terminal condition, external actions, and resume point. On an existing flow, call `inspect_flow`, `recover_flow`, and `audit_consistency` before routing. Never write the controlled state block directly.
 
+Prefer `start_or_resume_flow`, `advance_flow`, `record_delivery_evidence`, `record_review_findings`, and `close_verified_flow` for normal work. Keep `propose_transition`, `commit_transition`, and other low-level tools for diagnostics, explicit recovery, or a consequential change that needs a separate proposal.
+
 Persist this contract through the controller:
 
 ```text
@@ -30,9 +32,12 @@ status: active | awaiting-user | blocked-external | partial | failed | complete 
 current_phase: route | setup | clarify | prototype | spec | tickets | goal | execute | review | close
 next_phase, plan_target, terminal_condition, resume_point
 acceptance_criteria[], required_evidence_types[], external_actions[]
+terminal_observation?, review_findings[]
 ```
 
-Call `select_route` with the chosen procedure, reason, skipped phases, and confidence. Low confidence pauses only when competing routes materially change delivery.
+Call `select_route` with the chosen procedure, reason, skipped phases, setup requirement, and confidence. Every skipped phase must be named explicitly; the controller rejects an undeclared jump. A low-confidence route remains `awaiting-user` until the route choice is confirmed.
+
+The controller rejects skipped phases that are required by the selected flow. `spec` may only be omitted when the route records an explicitly approved imported spec. `execute` and `review` are never silently skippable. A phase completed earlier in the same flow remains satisfied when scope changes send work back to `clarify`; do not reclassify completed work as skipped.
 
 ## 2. Select Phase Procedures
 
@@ -54,6 +59,10 @@ Tell the user the flow and phase in one sentence. Ask only for product decisions
 ## 3. Transact Every Boundary
 
 Every controller write uses the latest `expected_revision` and a SHA-256 `request_digest` of the exact request. Use `propose_transition` when the change is consequential or needs review, then `commit_transition`. Revision conflict requires reinspection; do not replay stale input.
+
+Authorization has two distinct digests: the exact external action digest and the controller mutation digest. They must not be reused as aliases. A consumed receipt carries both, and recovery reconciles a receipt that was projected before the authorization row was marked consumed.
+
+New flows must start at `route -> clarify`. A non-direct flow cannot enter `execute` without a recorded `spec` phase (or an explicitly imported approved spec), and cannot enter `close` without a recorded `review` phase.
 
 Before crossing a phase boundary:
 
@@ -93,7 +102,9 @@ This workflow never grants commit, push, PR, merge, deploy, tracker mutation, pr
 
 ## 5. Verify And Close
 
-Record evidence with `validate_evidence`. Every item needs `evidence_id`, `acceptance_ids[]`, type, passing result, artifact, SHA-256 artifact digest, command/request ID, observation time, producer, environment, and optional supersession/expiry.
+Record evidence with `record_delivery_evidence` (or `validate_evidence` for low-level recovery). Every item needs `evidence_id`, `acceptance_ids[]`, type, passing result, artifact, SHA-256 artifact digest, command/request ID, observation time, producer, environment, and optional supersession/expiry. Relative artifact paths resolve from `plan_root` and are normalized before persistence.
+
+Review must be recorded with `record_review_findings`. Every finding needs a disposition; findings cannot be silently removed; P0/P1 findings must be fixed and include a re-verifier. Completion requires a `terminal_observation` that points to a current valid evidence record with the same artifact and digest.
 
 Call `close_flow` only after verification and review. It may set `complete/close/none` only when:
 
@@ -102,6 +113,7 @@ Call `close_flow` only after verification and review. It may set `complete/close
 - artifacts exist and their digests match;
 - evidence is current and failed or unresolved findings are absent;
 - external actions have consumed authorization receipts;
+- each external action receipt matches action, target, environment, and its exact request digest;
 - Plan Tree and the transaction journal agree;
 - native Plan is confirmed or explicitly unavailable with a handoff;
 - the observable terminal condition has been verified.

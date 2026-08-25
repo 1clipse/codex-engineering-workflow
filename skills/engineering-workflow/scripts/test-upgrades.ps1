@@ -32,6 +32,7 @@ try {
     $native = Invoke-Tool 'native-plan.ps1' @('-StatePath', $state)
     Assert-Case 'native Plan mapping' $native 0 'current-session-only'
     Assert-Case 'native Plan includes execute' $native 0 'Implement the approved contract'
+    Assert-Case 'native Plan includes remaining close gate' $native 0 'Verify the terminal condition'
 
     $route = Write-JsonFile 'route.json' @{ run_id='run-1'; flow='main'; chosen_procedure='implement'; why='Small approved change'; skipped_phases=@('prototype','tickets'); confidence='high' }
     Assert-Case 'route record' (Invoke-Tool 'route-record.ps1' @('-RecordPath', $route)) 0 'chosen_procedure'

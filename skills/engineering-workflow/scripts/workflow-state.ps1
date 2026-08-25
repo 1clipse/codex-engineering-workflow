@@ -94,6 +94,11 @@ try {
         if ($previous.status -in @('failed', 'cancelled') -and $state.status -eq 'active' -and $Event -ne 'user-resumed') {
             $errors.Add("Resuming status '$($previous.status)' requires event 'user-resumed'.")
         }
+        $previousFindingIds = @($previous.review_findings | ForEach-Object { [string]$_.finding_id })
+        $currentFindingIds = @($state.review_findings | ForEach-Object { [string]$_.finding_id })
+        foreach ($findingId in $previousFindingIds) {
+            if ($findingId -notin $currentFindingIds) { $errors.Add("Review finding '$findingId' cannot be silently removed.") }
+        }
     }
 
     if ($state.status -eq 'complete') {
@@ -106,6 +111,9 @@ try {
         if (-not $EvidencePath) {
             $errors.Add('Complete state requires a structured evidence file via -EvidencePath.')
         }
+        if (-not $state.terminal_observation) {
+            $errors.Add('Complete state requires terminal_observation evidence.')
+        }
     } elseif ($state.current_phase -eq 'close') {
         $errors.Add('current_phase=close is reserved for status=complete.')
     }
@@ -116,6 +124,38 @@ try {
     if ($state.status -in @('awaiting-user', 'blocked-external', 'partial', 'failed', 'cancelled') -and
         [string]::IsNullOrWhiteSpace([string]$state.resume_point)) {
         $errors.Add("Status '$($state.status)' requires a non-empty resume_point.")
+    }
+
+    foreach ($finding in @($state.review_findings)) {
+        if ([string]$finding.disposition -eq 'open') { $errors.Add("Review finding '$($finding.finding_id)' is still open.") }
+        if ([string]$finding.severity -in @('P0', 'P1') -and ([string]$finding.disposition -ne 'fixed' -or [string]::IsNullOrWhiteSpace([string]$finding.reverified_by))) {
+            $errors.Add("P0/P1 review finding '$($finding.finding_id)' must be fixed and include reverified_by.")
+        }
+    }
+
+    if ($state.status -eq 'complete') {
+        $requiredProperty = $contract.required_phases_by_flow.PSObject.Properties[[string]$state.flow]
+        $required = if ($requiredProperty) { @($requiredProperty.Value) } else { @() }
+        $completed = New-Object System.Collections.Generic.HashSet[string]
+        [void]$completed.Add([string]$state.current_phase)
+        foreach ($historyItem in @($state.history)) { if ($historyItem.new_phase) { [void]$completed.Add([string]$historyItem.new_phase) } }
+        $skipped = @()
+        if ($state.route -and $state.route.skipped_phases) { $skipped = @($state.route.skipped_phases) }
+        foreach ($phase in $required) {
+            $approvedSpec = ([string]$phase -eq 'spec' -and $state.route -and $state.route.approved_spec -eq $true)
+            if ($phase -in $skipped -and -not $approvedSpec) { $errors.Add("Required phase cannot be skipped: $phase") }
+            if (-not $completed.Contains([string]$phase) -and -not $approvedSpec) { $errors.Add("Required phase is incomplete: $phase") }
+        }
+    }
+
+    if ($state.terminal_observation -and $EvidencePath -and (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
+        try {
+            $evidenceRecords = @(Get-Content -LiteralPath $EvidencePath -Raw | ConvertFrom-Json)
+            $terminal = @($evidenceRecords | Where-Object { [string]$_.evidence_id -eq [string]$state.terminal_observation.evidence_id }) | Select-Object -First 1
+            if (-not $terminal -or [string]$terminal.artifact_digest -ne [string]$state.terminal_observation.artifact_digest) {
+                $errors.Add('terminal_observation must reference a current evidence record with the same artifact digest.')
+            }
+        } catch { $errors.Add("Unable to validate terminal_observation evidence: $($_.Exception.Message)") }
     }
 
     if ($errors.Count -gt 0) {

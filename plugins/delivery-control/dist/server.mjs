@@ -21151,20 +21151,23 @@ var StdioServerTransport = class {
 // src/core.mjs
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync as readFileSync2, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 
 // src/constants.mjs
-var FLOW_VALUES = ["main", "bug", "triage", "wayfinder", "maintenance", "direct"];
-var STATUS_VALUES = ["active", "awaiting-user", "blocked-external", "partial", "failed", "complete", "cancelled"];
-var PHASE_VALUES = ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"];
+import { readFileSync } from "node:fs";
+var POLICY = JSON.parse(readFileSync(new URL("../schemas/workflow-policy.json", import.meta.url), "utf8"));
+var FLOW_VALUES = POLICY.flows;
+var STATUS_VALUES = POLICY.statuses;
+var PHASE_VALUES = POLICY.phases;
 var EVIDENCE_RESULTS = ["passed", "verified", "accepted", "observed"];
 var STATE_START = "<!-- delivery-control:state:start -->";
 var STATE_END = "<!-- delivery-control:state:end -->";
 var LEGACY_START = "<!-- engineering-workflow:state:start -->";
 var LEGACY_END = "<!-- engineering-workflow:state:end -->";
-var SCHEMA_VERSION = 1;
+var SCHEMA_VERSION = 2;
+var DEFAULT_BACKUP_RETENTION = 5;
 var DEFAULT_LEASE_MS = 3e4;
 var DEFAULT_AUTH_TTL_MS = 5 * 6e4;
 var PHASE_LABELS = {
@@ -21191,42 +21194,12 @@ var SENSITIVE_ACTIONS = /* @__PURE__ */ new Set([
   "external-message",
   "costly-service-call"
 ]);
-var PHASE_TRANSITIONS = {
-  route: ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"],
-  setup: ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review"],
-  clarify: ["route", "clarify", "prototype", "spec", "tickets", "goal", "execute"],
-  prototype: ["route", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"],
-  spec: ["route", "clarify", "prototype", "spec", "tickets", "goal", "execute"],
-  tickets: ["route", "clarify", "spec", "tickets", "goal", "execute"],
-  goal: ["route", "clarify", "spec", "tickets", "goal", "execute"],
-  execute: ["route", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review"],
-  review: ["route", "execute", "review", "close"],
-  close: ["close"]
-};
-var STATUS_TRANSITIONS = {
-  active: ["active", "awaiting-user", "blocked-external", "partial", "failed", "complete", "cancelled"],
-  "awaiting-user": ["active", "awaiting-user", "blocked-external", "partial", "failed", "cancelled"],
-  "blocked-external": ["active", "awaiting-user", "blocked-external", "partial", "failed", "cancelled"],
-  partial: ["active", "awaiting-user", "blocked-external", "partial", "failed", "cancelled"],
-  failed: ["active", "failed", "cancelled"],
-  complete: ["complete"],
-  cancelled: ["active", "cancelled"]
-};
-var EVENT_RULES = {
-  "route-selected": { status: ["active"], current_phase: ["route"] },
-  "spec-not-ready": { status: ["active"], current_phase: ["clarify", "spec"] },
-  "several-frontiers": { status: ["awaiting-user"], current_phase: ["tickets"] },
-  "user-decision-needed": { status: ["awaiting-user"] },
-  "external-blocker": { status: ["blocked-external"] },
-  "partial-result": { status: ["partial"] },
-  "execution-blocked": { status: ["awaiting-user"], current_phase: ["execute"] },
-  "unrecoverable-failure": { status: ["failed"], next_phase: ["none"] },
-  "review-p0-p1": { status: ["active"], current_phase: ["execute"], next_phase: ["review"] },
-  "scope-change": { status: ["active"], current_phase: ["route"] },
-  "user-cancelled": { status: ["cancelled"], next_phase: ["none"] },
-  "user-resumed": { status: ["active"] },
-  "terminal-verified": { status: ["complete"], current_phase: ["close"], next_phase: ["none"] }
-};
+var PHASE_TRANSITIONS = POLICY.allowed_phase_transitions;
+var STATUS_TRANSITIONS = POLICY.allowed_status_transitions;
+var EVENT_RULES = POLICY.event_rules;
+var PHASE_ORDER = POLICY.phase_order;
+var REQUIRED_PHASES_BY_FLOW = POLICY.required_phases_by_flow;
+var REQUIRED_PHASE_SKIP_EXCEPTIONS = POLICY.required_phase_skip_exceptions || {};
 
 // src/core.mjs
 var ok = (value) => ({ ok: true, ...value });
@@ -21238,6 +21211,10 @@ var canonical = (value) => {
   return JSON.stringify(value);
 };
 var sha256 = (value) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+var requestDigest = (operation, input, fields) => sha256(canonical({
+  operation,
+  ...Object.fromEntries(fields.map((field) => [field, input[field]]))
+}));
 function assertString(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`);
   return value.trim();
@@ -21250,10 +21227,14 @@ function contained(root, target) {
   throw new Error("plan_target must be inside plan_root");
 }
 function readText(path) {
-  return readFileSync(path, "utf8");
+  return readFileSync2(path, "utf8");
 }
 function fileDigest(path) {
-  return sha256(readFileSync(path));
+  return sha256(readFileSync2(path));
+}
+function artifactPath(planRoot, artifact) {
+  const value = assertString(artifact, "artifact");
+  return isAbsolute(value) ? resolve(value) : resolve(planRoot, value);
 }
 function syncDirectory(path) {
   let fd;
@@ -21268,8 +21249,10 @@ function syncDirectory(path) {
 }
 function atomicProject(target, content, transactionId) {
   const folder = dirname(target);
+  const backupFolder = join(folder, ".delivery-control-backups");
+  mkdirSync(backupFolder, { recursive: true });
   const temp = join(folder, `.${transactionId}.delivery-control.tmp`);
-  const backup = `${target}.${(/* @__PURE__ */ new Date()).toISOString().replaceAll(":", "").replaceAll(".", "")}.${transactionId}.bak`;
+  const backup = join(backupFolder, `${basename(target)}.${(/* @__PURE__ */ new Date()).toISOString().replaceAll(":", "").replaceAll(".", "")}.${transactionId}.bak`);
   copyFileSync(target, backup);
   const fd = openSync(temp, "wx");
   try {
@@ -21280,6 +21263,14 @@ function atomicProject(target, content, transactionId) {
   }
   renameSync(temp, target);
   syncDirectory(folder);
+  syncDirectory(backupFolder);
+  const backups = readdirSync(backupFolder).filter((name) => name.startsWith(`${basename(target)}.`) && name.endsWith(".bak")).map((name) => ({ name, path: join(backupFolder, name), mtime: statSync(join(backupFolder, name)).mtimeMs })).sort((a, b) => b.mtime - a.mtime);
+  for (const stale of backups.slice(DEFAULT_BACKUP_RETENTION)) {
+    try {
+      unlinkSync(stale.path);
+    } catch {
+    }
+  }
   return { backup, temp };
 }
 function normalizeState(input) {
@@ -21301,6 +21292,8 @@ function normalizeState(input) {
     native_plan_digest: input.native_plan_digest ?? null,
     correlation_id: input.correlation_id ?? null,
     receipt_digest: input.receipt_digest ?? null,
+    terminal_observation: input.terminal_observation ?? null,
+    review_findings: Array.isArray(input.review_findings) ? input.review_findings : [],
     evidence_records: Array.isArray(input.evidence_records) ? input.evidence_records : [],
     authorization_receipts: Array.isArray(input.authorization_receipts) ? input.authorization_receipts : [],
     history: Array.isArray(input.history) ? input.history : []
@@ -21317,6 +21310,31 @@ function normalizeState(input) {
     ids.add(acceptance_id);
     return { acceptance_id, description: assertString(criterion.description, "acceptance description") };
   });
+  const findingIds = /* @__PURE__ */ new Set();
+  state.review_findings = state.review_findings.map((finding) => {
+    const finding_id = assertString(finding.finding_id, "finding_id");
+    if (findingIds.has(finding_id)) throw new Error(`duplicate finding_id: ${finding_id}`);
+    findingIds.add(finding_id);
+    const severity = assertString(finding.severity, "finding severity");
+    const disposition = assertString(finding.disposition, "finding disposition");
+    if (!["P0", "P1", "P2", "P3"].includes(severity)) throw new Error(`unknown finding severity: ${severity}`);
+    if (!["open", "fixed", "accepted", "deferred"].includes(disposition)) throw new Error(`unknown finding disposition: ${disposition}`);
+    if (["fixed", "accepted", "deferred"].includes(disposition) && !assertString(finding.reason || finding.reverified_by || "", "finding disposition reason")) throw new Error(`finding ${finding_id} needs a disposition reason`);
+    return { finding_id, severity, disposition, reason: finding.reason || null, reverified_by: finding.reverified_by || null };
+  });
+  const actionIds = /* @__PURE__ */ new Set();
+  state.external_actions = state.external_actions.map((action) => {
+    const normalized = { action: assertString(action.action, "external action"), target: assertString(action.target, "external target"), environment: assertString(action.environment, "external environment"), request_digest: action.request_digest || null };
+    const key = `${normalized.action}|${normalized.target}|${normalized.environment}|${normalized.request_digest || "legacy"}`;
+    if (actionIds.has(key)) throw new Error(`duplicate external action: ${key}`);
+    actionIds.add(key);
+    if (normalized.request_digest && !/^sha256:[0-9a-f]{64}$/.test(normalized.request_digest)) throw new Error("external action request_digest must be sha256:<64 lowercase hex>");
+    return normalized;
+  });
+  if (state.terminal_observation !== null) {
+    for (const field of ["evidence_id", "artifact", "artifact_digest", "observed_at", "result"]) assertString(state.terminal_observation[field], `terminal observation ${field}`);
+    if (!/^sha256:[0-9a-f]{64}$/.test(state.terminal_observation.artifact_digest)) throw new Error("terminal observation artifact_digest must be sha256:<64 lowercase hex>");
+  }
   return state;
 }
 function stateBlock(state) {
@@ -21333,6 +21351,34 @@ function validateTransition(previous, next, event) {
   if (rule) {
     for (const [field, allowed] of Object.entries(rule)) if (!allowed.includes(next[field])) throw Object.assign(new Error(`${event} requires ${field} in ${allowed.join(", ")}`), { code: "event_rule_violation" });
   }
+  if (next.status === "complete" && event !== "terminal-verified") throw Object.assign(new Error("complete requires terminal-verified"), { code: "completion_gate_required" });
+  if (next.current_phase === "close" && next.status !== "complete") throw Object.assign(new Error("close phase requires complete status"), { code: "invalid_close_state" });
+  if (!["complete", "failed", "cancelled"].includes(next.status) && next.next_phase === "none") throw Object.assign(new Error("non-terminal state requires a next phase"), { code: "missing_next_phase" });
+  const route = next.route || previous.route;
+  const previousIndex = PHASE_ORDER.indexOf(previous.current_phase);
+  const nextIndex = PHASE_ORDER.indexOf(next.current_phase);
+  const completed = /* @__PURE__ */ new Set([previous.current_phase, ...(previous.history || []).map((item) => item.new_phase)]);
+  if (nextIndex > previousIndex && route) {
+    const skipped = new Set(route.skipped_phases || []);
+    for (const phase of PHASE_ORDER.slice(previousIndex + 1, nextIndex)) {
+      if (!skipped.has(phase) && !completed.has(phase)) throw Object.assign(new Error(`phase ${phase} must be completed or explicitly skipped before ${next.current_phase}`), { code: "phase_skip_not_declared" });
+    }
+  }
+  const required2 = REQUIRED_PHASES_BY_FLOW[next.flow] || [];
+  if (next.current_phase === "execute" && required2.includes("spec") && !completed.has("spec") && !next.route?.approved_spec) throw Object.assign(new Error("spec must be ready before execute"), { code: "spec_required" });
+  if (next.current_phase === "review" && required2.includes("execute") && !completed.has("execute")) throw Object.assign(new Error("execute must be completed before review"), { code: "execute_required" });
+  if (next.current_phase === "close") {
+    const skipped = new Set(next.route?.skipped_phases || previous.route?.skipped_phases || []);
+    for (const phase of required2) {
+      const exceptionField = REQUIRED_PHASE_SKIP_EXCEPTIONS[phase];
+      const approvedSpec = exceptionField ? next.route?.[exceptionField] === true : false;
+      if (skipped.has(phase) && !approvedSpec) throw Object.assign(new Error(`required phase cannot be skipped: ${phase}`), { code: "required_phase_skipped" });
+      if (!completed.has(phase) && !approvedSpec) throw Object.assign(new Error(`required phase is incomplete: ${phase}`), { code: "required_phase_incomplete" });
+    }
+  }
+  const previousFindings = new Set((previous.review_findings || []).map((finding) => finding.finding_id));
+  const nextFindings = new Set((next.review_findings || []).map((finding) => finding.finding_id));
+  for (const findingId of previousFindings) if (!nextFindings.has(findingId)) throw Object.assign(new Error(`review finding cannot be removed: ${findingId}`), { code: "review_finding_removed" });
 }
 function count(text, token) {
   return text.split(token).length - 1;
@@ -21405,6 +21451,7 @@ function publicFlow(row) {
     acceptance_criteria: JSON.parse(row.acceptance_json || "[]"),
     required_evidence_types: JSON.parse(row.required_types_json || "[]"),
     external_actions: JSON.parse(row.external_actions_json || "[]"),
+    ...JSON.parse(row.gate_json || '{"review_findings":[],"terminal_observation":null}'),
     evidence_records: JSON.parse(row.evidence_json || "[]"),
     authorization_receipts: JSON.parse(row.authorization_receipts_json || "[]"),
     history: JSON.parse(row.history_json || "[]"),
@@ -21413,6 +21460,9 @@ function publicFlow(row) {
     created_at: row.created_at,
     updated_at: row.updated_at
   };
+}
+function gateJson(state) {
+  return JSON.stringify({ review_findings: state.review_findings || [], terminal_observation: state.terminal_observation || null });
 }
 var DeliveryControl = class {
   constructor(options = {}) {
@@ -21438,7 +21488,7 @@ var DeliveryControl = class {
         terminal_condition TEXT NOT NULL, resume_point TEXT NOT NULL, plan_tree_digest TEXT NOT NULL,
         native_plan_digest TEXT, plan_sync TEXT NOT NULL DEFAULT 'pending', frozen INTEGER NOT NULL DEFAULT 0,
         drift_report TEXT, route_json TEXT, acceptance_json TEXT NOT NULL DEFAULT '[]', required_types_json TEXT NOT NULL DEFAULT '[]',
-        external_actions_json TEXT NOT NULL DEFAULT '[]', correlation_id TEXT, receipt_digest TEXT,
+        external_actions_json TEXT NOT NULL DEFAULT '[]', gate_json TEXT NOT NULL DEFAULT '{"review_findings":[],"terminal_observation":null}', correlation_id TEXT, receipt_digest TEXT,
         evidence_json TEXT NOT NULL DEFAULT '[]', authorization_receipts_json TEXT NOT NULL DEFAULT '[]', history_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
@@ -21461,8 +21511,8 @@ var DeliveryControl = class {
       );
       CREATE TABLE IF NOT EXISTS authorizations (
         authorization_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, environment TEXT NOT NULL,
-        request_digest TEXT NOT NULL, expires_at TEXT NOT NULL, nonce TEXT NOT NULL UNIQUE, challenge_digest TEXT NOT NULL,
-        confirmed_by TEXT, confirmed_at TEXT, consumed_at TEXT, created_at TEXT NOT NULL
+        request_digest TEXT NOT NULL, control_request_digest TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, nonce TEXT NOT NULL UNIQUE, challenge_digest TEXT NOT NULL,
+        confirmed_by TEXT, confirmed_at TEXT, confirmed_request_digest TEXT, consumed_at TEXT, consumed_request_digest TEXT, created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS native_plan_sync (
         projection_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, flow_revision INTEGER NOT NULL, projection_revision INTEGER NOT NULL,
@@ -21477,11 +21527,22 @@ var DeliveryControl = class {
       CREATE INDEX IF NOT EXISTS idx_auth_flow ON authorizations(flow_id);
     `);
     const columns = new Set(this.db.prepare("PRAGMA table_info(flows)").all().map((column) => column.name));
-    for (const [name, definition] of [["evidence_json", "TEXT NOT NULL DEFAULT '[]'"], ["authorization_receipts_json", "TEXT NOT NULL DEFAULT '[]'"], ["history_json", "TEXT NOT NULL DEFAULT '[]'"]]) {
+    for (const [name, definition] of [["evidence_json", "TEXT NOT NULL DEFAULT '[]'"], ["authorization_receipts_json", "TEXT NOT NULL DEFAULT '[]'"], ["history_json", "TEXT NOT NULL DEFAULT '[]'"], ["gate_json", `TEXT NOT NULL DEFAULT '{"review_findings":[],"terminal_observation":null}'`]]) {
       if (!columns.has(name)) this.db.exec(`ALTER TABLE flows ADD COLUMN ${name} ${definition}`);
     }
     const version2 = this.db.prepare("SELECT version FROM schema_meta").get().version;
-    if (version2 !== SCHEMA_VERSION) throw new Error(`Unsupported database schema: ${version2}`);
+    if (version2 > SCHEMA_VERSION) throw new Error(`Unsupported database schema: ${version2}`);
+    if (version2 < 2) {
+      const authColumns = new Set(this.db.prepare("PRAGMA table_info(authorizations)").all().map((column) => column.name));
+      for (const [name, definition] of [
+        ["control_request_digest", "TEXT NOT NULL DEFAULT ''"],
+        ["confirmed_request_digest", "TEXT"],
+        ["consumed_request_digest", "TEXT"]
+      ]) if (!authColumns.has(name)) this.db.exec(`ALTER TABLE authorizations ADD COLUMN ${name} ${definition}`);
+      this.db.prepare("UPDATE schema_meta SET version=?").run(2);
+    }
+    const migratedVersion = this.db.prepare("SELECT version FROM schema_meta").get().version;
+    if (migratedVersion !== SCHEMA_VERSION) throw new Error(`Unsupported database schema: ${migratedVersion}`);
   }
   transaction(fn) {
     this.db.exec("BEGIN IMMEDIATE");
@@ -21518,6 +21579,10 @@ var DeliveryControl = class {
       if (!/^sha256:[0-9a-f]{64}$/.test(input.request_digest)) return fail("invalid_request_digest", "request_digest must be sha256:<64 lowercase hex>");
       const { rootPath, targetPath } = contained(input.plan_root, input.plan_target);
       if (!existsSync(targetPath) || !statSync(targetPath).isFile()) return fail("plan_target_missing", "Plan Tree target must already exist");
+      for (const action of input.external_actions || []) {
+        if (!SENSITIVE_ACTIONS.has(action.action)) return fail("action_not_controlled", `external action is not in the controlled set: ${action.action}`);
+        if (!/^sha256:[0-9a-f]{64}$/.test(action.request_digest || "")) return fail("authorization_digest_required", `external action ${action.action} requires an exact request_digest`);
+      }
       const flowId2 = input.flow_id || randomUUID();
       if (this.row(flowId2)) return fail("flow_exists", `flow already exists: ${flowId2}`);
       const current = readText(targetPath);
@@ -21527,13 +21592,16 @@ var DeliveryControl = class {
       } catch {
       }
       imported ??= parseLegacyBlock(current, targetPath);
+      const requestedCurrent = input.current_phase || "route";
+      const requestedNext = input.next_phase || "clarify";
+      if (!imported && (requestedCurrent !== "route" || requestedNext !== "clarify")) return fail("flow_must_start_at_route", "new flows must start at route -> clarify; use recover_flow to import an existing Plan Tree state");
       const state = normalizeState(imported ? { ...imported, flow_id: flowId2, plan_target: targetPath } : {
         flow_id: flowId2,
         revision: 0,
         flow: input.flow || "main",
         status: "active",
-        current_phase: input.current_phase || "route",
-        next_phase: input.next_phase || "clarify",
+        current_phase: "route",
+        next_phase: "clarify",
         plan_target: targetPath,
         terminal_condition: input.terminal_condition,
         resume_point: input.resume_point,
@@ -21550,8 +21618,8 @@ var DeliveryControl = class {
       const at = nowIso(this.clock);
       this.transaction(() => {
         this.db.prepare(`INSERT INTO flows(flow_id,revision,plan_root,plan_target,flow,status,current_phase,next_phase,terminal_condition,resume_point,
-          plan_tree_digest,native_plan_digest,plan_sync,frozen,drift_report,route_json,acceptance_json,required_types_json,external_actions_json,
-          correlation_id,receipt_digest,evidence_json,authorization_receipts_json,history_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        plan_tree_digest,native_plan_digest,plan_sync,frozen,drift_report,route_json,acceptance_json,required_types_json,external_actions_json,gate_json,
+          correlation_id,receipt_digest,evidence_json,authorization_receipts_json,history_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
           flowId2,
           state.revision,
           rootPath,
@@ -21571,6 +21639,7 @@ var DeliveryControl = class {
           JSON.stringify(state.acceptance_criteria),
           JSON.stringify(state.required_evidence_types),
           JSON.stringify(state.external_actions),
+          gateJson(state),
           state.correlation_id,
           state.receipt_digest,
           JSON.stringify(state.evidence_records),
@@ -21591,15 +21660,58 @@ var DeliveryControl = class {
     const row = this.row(flowId2);
     return row ? ok({ flow: publicFlow(row) }) : fail("flow_not_found", `unknown flow: ${flowId2}`);
   }
+  startOrResumeFlow(input) {
+    if (input.flow_id && this.row(input.flow_id)) {
+      return this.recoverFlow({ flow_id: input.flow_id, expected_revision: input.expected_revision, request_digest: input.request_digest, plan_root: input.plan_root, plan_target: input.plan_target });
+    }
+    return this.initializeFlow(input);
+  }
+  advanceFlow(input) {
+    const committed = this.commitTransition(input);
+    if (!committed.ok) return committed;
+    const projection = this.projectNativePlan({ flow_id: input.flow_id, expected_revision: committed.flow.revision, request_digest: requestDigest("project_native_plan", { ...input, expected_revision: committed.flow.revision }, ["flow_id", "expected_revision"]) });
+    return ok({ flow: projection.ok ? projection.flow || committed.flow : committed.flow, native_plan_projection: projection.ok ? projection : { ok: false, error: projection.error } });
+  }
+  recordDeliveryEvidence(input) {
+    const recorded = this.addEvidence(input);
+    if (!recorded.ok) return recorded;
+    return ok({ flow: recorded.flow, validation: this.validateEvidence({ flow_id: input.flow_id }) });
+  }
+  recordReviewFindings(input) {
+    const row = this.row(input.flow_id);
+    if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
+    if (!Array.isArray(input.review_findings)) return fail("invalid_review_findings", "review_findings must be an array");
+    const previous = publicFlow(row).review_findings || [];
+    const incoming = new Map(input.review_findings.map((finding) => [finding.finding_id, finding]));
+    const merged = previous.map((finding) => incoming.get(finding.finding_id) || finding);
+    for (const finding of input.review_findings) if (!previous.some((item) => item.finding_id === finding.finding_id)) merged.push(finding);
+    return this.commitTransition({ flow_id: input.flow_id, expected_revision: input.expected_revision, request_digest: input.request_digest, event: "review-recorded", reason: input.reason || "record review dispositions", patch: { review_findings: merged } });
+  }
+  closeVerifiedFlow(input) {
+    return this.closeFlow(input);
+  }
   selectRoute(input) {
+    const row = this.row(input.flow_id);
+    if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
+    const skipped = [...new Set(input.skipped_phases || [])];
+    for (const phase of skipped) if (!PHASE_ORDER.includes(phase) || phase === "route" || phase === "close") return fail("invalid_skipped_phase", `cannot skip phase: ${phase}`);
+    if (input.setup_required !== true && !skipped.includes("setup")) skipped.unshift("setup");
+    const required2 = REQUIRED_PHASES_BY_FLOW[row.flow] || [];
+    const invalidRequiredSkips = required2.filter((phase) => skipped.includes(phase) && !(REQUIRED_PHASE_SKIP_EXCEPTIONS[phase] && input.approved_spec === true));
+    if (invalidRequiredSkips.length) return fail("required_phase_skipped", `required phases cannot be skipped: ${invalidRequiredSkips.join(", ")}`, { phases: invalidRequiredSkips });
     const route = {
       chosen_procedure: assertString(input.chosen_procedure, "chosen_procedure"),
       why: assertString(input.why, "why"),
-      skipped_phases: input.skipped_phases || [],
+      skipped_phases: skipped,
       confidence: input.confidence || "high",
+      approved_spec: input.approved_spec === true,
       selected_at: nowIso(this.clock)
     };
-    return this.commitTransition({ ...input, event: "route-selected", reason: input.reason || route.why, patch: { route } });
+    const nextPhase = PHASE_ORDER.slice(1).find((phase) => !skipped.includes(phase)) || "close";
+    const awaiting = route.confidence === "low" && input.confirmed !== true;
+    const patch = { route, status: awaiting ? "awaiting-user" : "active", next_phase: awaiting ? "route" : nextPhase };
+    if (awaiting) patch.resume_point = "Route confidence is low; user must confirm the selected route";
+    return this.commitTransition({ ...input, event: "route-selected", reason: input.reason || route.why, patch });
   }
   proposeTransition(input) {
     try {
@@ -21611,8 +21723,9 @@ var DeliveryControl = class {
       const next = normalizeState({ ...state, ...input.patch, revision: row.revision + 1 });
       validateTransition(state, next, input.event || "advance");
       if (next.status === "complete" && input.event !== "terminal-verified") return fail("completion_gate_required", "use close_flow to complete a flow");
-      const requestDigest = input.request_digest || sha256(canonical({ flow_id: input.flow_id, expected_revision: input.expected_revision, event: input.event, patch: input.patch, reason: input.reason }));
-      return ok({ proposal: { flow_id: input.flow_id, expected_revision: row.revision, target_revision: next.revision, event: input.event || "advance", reason: assertString(input.reason, "reason"), request_digest: requestDigest, state: next } });
+      const requestDigest2 = input.request_digest || sha256(canonical({ flow_id: input.flow_id, expected_revision: input.expected_revision, event: input.event, patch: input.patch, reason: input.reason }));
+      if (!/^sha256:[0-9a-f]{64}$/.test(requestDigest2)) throw Object.assign(new Error("request_digest must be sha256:<64 lowercase hex>"), { code: "invalid_request_digest" });
+      return ok({ proposal: { flow_id: input.flow_id, expected_revision: row.revision, target_revision: next.revision, event: input.event || "advance", reason: assertString(input.reason, "reason"), request_digest: requestDigest2, state: next } });
     } catch (error2) {
       return fail(error2.code || "proposal_failed", error2.message);
     }
@@ -21670,7 +21783,7 @@ var DeliveryControl = class {
         const state = normalizeState(proposal.state);
         this.db.prepare(`UPDATE pending_transactions SET stage='projected',backup_path=?,temp_path=?,updated_at=? WHERE transaction_id=?`).run(paths.backup, paths.temp, nowIso(this.clock), txId);
         this.db.prepare(`UPDATE flows SET revision=?,flow=?,status=?,current_phase=?,next_phase=?,terminal_condition=?,resume_point=?,plan_tree_digest=?,
-          native_plan_digest=?,plan_sync=?,route_json=?,acceptance_json=?,required_types_json=?,external_actions_json=?,correlation_id=?,receipt_digest=?,evidence_json=?,authorization_receipts_json=?,history_json=?,updated_at=? WHERE flow_id=?`).run(
+          native_plan_digest=?,plan_sync=?,route_json=?,acceptance_json=?,required_types_json=?,external_actions_json=?,gate_json=?,correlation_id=?,receipt_digest=?,evidence_json=?,authorization_receipts_json=?,history_json=?,updated_at=? WHERE flow_id=?`).run(
           state.revision,
           state.flow,
           state.status,
@@ -21685,6 +21798,7 @@ var DeliveryControl = class {
           JSON.stringify(state.acceptance_criteria),
           JSON.stringify(state.required_evidence_types),
           JSON.stringify(state.external_actions),
+          gateJson(state),
           state.correlation_id,
           state.receipt_digest,
           JSON.stringify(state.evidence_records),
@@ -21724,8 +21838,8 @@ var DeliveryControl = class {
         if (state.flow_id !== input.flow_id) return fail("flow_identity_mismatch", "Plan Tree flow_id does not match requested flow");
         const at = nowIso(this.clock);
         this.transaction(() => this.db.prepare(`INSERT INTO flows(flow_id,revision,plan_root,plan_target,flow,status,current_phase,next_phase,terminal_condition,resume_point,
-          plan_tree_digest,native_plan_digest,plan_sync,frozen,drift_report,route_json,acceptance_json,required_types_json,external_actions_json,
-          correlation_id,receipt_digest,evidence_json,authorization_receipts_json,history_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          plan_tree_digest,native_plan_digest,plan_sync,frozen,drift_report,route_json,acceptance_json,required_types_json,external_actions_json,gate_json,
+          correlation_id,receipt_digest,evidence_json,authorization_receipts_json,history_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
           state.flow_id,
           state.revision,
           rootPath,
@@ -21745,6 +21859,7 @@ var DeliveryControl = class {
           JSON.stringify(state.acceptance_criteria),
           JSON.stringify(state.required_evidence_types),
           JSON.stringify(state.external_actions),
+          gateJson(state),
           state.correlation_id,
           state.receipt_digest,
           JSON.stringify(state.evidence_records),
@@ -21774,7 +21889,7 @@ var DeliveryControl = class {
           const state = normalizeState(JSON.parse(tx.new_state));
           this.transaction(() => {
             this.db.prepare(`UPDATE flows SET revision=?,flow=?,status=?,current_phase=?,next_phase=?,terminal_condition=?,resume_point=?,plan_tree_digest=?,
-              native_plan_digest=?,plan_sync=?,route_json=?,acceptance_json=?,required_types_json=?,external_actions_json=?,correlation_id=?,receipt_digest=?,evidence_json=?,authorization_receipts_json=?,history_json=?,updated_at=? WHERE flow_id=?`).run(
+              native_plan_digest=?,plan_sync=?,route_json=?,acceptance_json=?,required_types_json=?,external_actions_json=?,gate_json=?,correlation_id=?,receipt_digest=?,evidence_json=?,authorization_receipts_json=?,history_json=?,updated_at=? WHERE flow_id=?`).run(
               state.revision,
               state.flow,
               state.status,
@@ -21789,6 +21904,7 @@ var DeliveryControl = class {
               JSON.stringify(state.acceptance_criteria),
               JSON.stringify(state.required_evidence_types),
               JSON.stringify(state.external_actions),
+              gateJson(state),
               state.correlation_id,
               state.receipt_digest,
               JSON.stringify(state.evidence_records),
@@ -21811,6 +21927,7 @@ var DeliveryControl = class {
         } else {
           const report = { detected_at: nowIso(this.clock), transaction_id: tx.transaction_id, old_digest: tx.old_digest, projected_digest: tx.new_digest, actual_digest: actual, source: "recover_flow" };
           this.freezeForDrift(row.flow_id, report);
+          this.transaction(() => this.db.prepare("DELETE FROM leases WHERE flow_id=? AND owner=?").run(row.flow_id, recoveryOwner));
           return fail("unresolved_drift", "Plan Tree conflicts with both journal versions", { drift_report: report });
         }
       }
@@ -21820,6 +21937,7 @@ var DeliveryControl = class {
         if (actual !== row.plan_tree_digest) {
           const report = { detected_at: nowIso(this.clock), expected_digest: row.plan_tree_digest, actual_digest: actual, source: "recover_flow" };
           this.freezeForDrift(row.flow_id, report);
+          this.transaction(() => this.db.prepare("DELETE FROM leases WHERE flow_id=? AND owner=?").run(row.flow_id, recoveryOwner));
           return fail("unresolved_drift", "Plan Tree changed outside the transaction log", { drift_report: report });
         }
       }
@@ -21827,6 +21945,26 @@ var DeliveryControl = class {
       return ok({ action: actions.length ? "reconciled" : "already-consistent", actions, flow: publicFlow(this.row(input.flow_id)) });
     } catch (error2) {
       return fail(error2.code || "recovery_failed", error2.message);
+    }
+  }
+  resolveDrift(input) {
+    try {
+      const row = this.row(input.flow_id);
+      if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
+      if (row.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: row.revision });
+      if (!/^sha256:[0-9a-f]{64}$/.test(input.request_digest || "")) return fail("invalid_request_digest", "request_digest must be sha256:<64 lowercase hex>");
+      if (input.resolution !== "accept-restored-plan-tree") return fail("resolution_required", "explicit restored Plan Tree resolution is required");
+      assertString(input.reason, "reason");
+      const actual = fileDigest(row.plan_target);
+      if (actual !== row.plan_tree_digest) return fail("plan_tree_drift", "Plan Tree still differs from the controller digest", { expected: row.plan_tree_digest, actual });
+      const pending = this.db.prepare("SELECT transaction_id,stage FROM pending_transactions WHERE flow_id=? AND stage IN ('prepared','projected')").all(row.flow_id);
+      if (pending.length) return fail("pending_transactions", "resolve drift only after pending transactions are recovered", { pending });
+      const planState = parseStateBlock(readText(row.plan_target));
+      if (planState.flow_id !== row.flow_id || planState.revision !== row.revision) return fail("plan_state_mismatch", "restored Plan Tree state does not match the controller revision");
+      this.transaction(() => this.db.prepare("UPDATE flows SET status=?,frozen=0,drift_report=NULL,updated_at=? WHERE flow_id=?").run(planState.status, nowIso(this.clock), row.flow_id));
+      return ok({ action: "drift-resolved", reason: input.reason, flow: publicFlow(this.row(row.flow_id)) });
+    } catch (error2) {
+      return fail(error2.code || "drift_resolution_failed", error2.message);
     }
   }
   auditConsistency(flowId2) {
@@ -21846,9 +21984,11 @@ var DeliveryControl = class {
     if (row.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: row.revision });
     if (!/^sha256:[0-9a-f]{64}$/.test(input.request_digest || "")) return fail("invalid_request_digest", "request_digest must be sha256:<64 lowercase hex>");
     if (row.frozen) return fail("flow_frozen", "flow is frozen");
-    const phases = [row.current_phase, ...row.next_phase === "none" ? [] : [row.next_phase]];
-    const steps = [...new Set(phases)].map((phase, index) => ({ step: PHASE_LABELS[phase], status: index === 0 ? "in_progress" : "pending" }));
-    if (row.status === "complete") steps[0].status = "completed";
+    const route = row.route_json ? JSON.parse(row.route_json) : null;
+    const skipped = new Set(route?.skipped_phases || []);
+    const start = PHASE_ORDER.indexOf(row.current_phase);
+    const phases = PHASE_ORDER.slice(Math.max(start, 0)).filter((phase) => phase === row.current_phase || phase === row.next_phase || !skipped.has(phase));
+    const steps = [...new Set(phases)].map((phase) => ({ step: PHASE_LABELS[phase], status: phase === row.current_phase ? row.status === "complete" ? "completed" : "in_progress" : "pending" }));
     const projectionRevision = this.db.prepare("SELECT COALESCE(MAX(projection_revision),0) AS value FROM native_plan_sync WHERE flow_id=?").get(row.flow_id).value + 1;
     const plan = { flow_id: row.flow_id, flow_revision: row.revision, projection_revision: projectionRevision, steps };
     const digest2 = sha256(canonical(plan));
@@ -21894,7 +22034,7 @@ var DeliveryControl = class {
       if (Number.isNaN(Date.parse(evidence.observed_at))) throw new Error("observed_at must be ISO-8601");
       const existing = JSON.parse(row.evidence_json || "[]");
       if (existing.some((item) => item.evidence_id === evidence.evidence_id)) return fail("evidence_exists", `evidence already exists: ${evidence.evidence_id}`);
-      const record2 = { ...evidence, acceptance_ids: [...new Set(evidence.acceptance_ids)], supersedes: evidence.supersedes || null, expires_at: evidence.expires_at || null, legacy_unverified: false };
+      const record2 = { ...evidence, artifact: artifactPath(row.plan_root, evidence.artifact), acceptance_ids: [...new Set(evidence.acceptance_ids)], supersedes: evidence.supersedes || null, expires_at: evidence.expires_at || null, legacy_unverified: false };
       const committed = this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest, event: "evidence-recorded", reason: `record evidence ${record2.evidence_id}`, patch: { evidence_records: [...existing, record2] } });
       if (!committed.ok) return committed;
       this.syncEvidenceCache(row.flow_id, committed.flow.evidence_records);
@@ -21922,9 +22062,10 @@ var DeliveryControl = class {
       if (item.legacy_unverified) reason = "legacy-unverified";
       else if (item.expires_at && Date.parse(item.expires_at) <= this.clock()) reason = "expired";
       else if (!EVIDENCE_RESULTS.includes(item.result)) reason = "failed-result";
-      else if (!existsSync(item.artifact) || !statSync(item.artifact).isFile()) reason = "artifact-missing";
-      else if (fileDigest(item.artifact) !== item.artifact_digest) reason = "artifact-digest-mismatch";
-      (reason ? invalid : valid).push({ ...item, reason });
+      const artifact = artifactPath(row.plan_root, item.artifact);
+      if (!reason && (!existsSync(artifact) || !statSync(artifact).isFile())) reason = "artifact-missing";
+      else if (!reason && fileDigest(artifact) !== item.artifact_digest) reason = "artifact-digest-mismatch";
+      (reason ? invalid : valid).push({ ...item, artifact, reason });
     }
     const covered = new Set(valid.flatMap((item) => item.acceptance_ids));
     const types = new Set(valid.map((item) => item.type));
@@ -21953,22 +22094,29 @@ var DeliveryControl = class {
       const nonce = randomBytes(18).toString("base64url");
       const challenge = randomBytes(4).toString("hex").toUpperCase();
       const expiresAt = new Date(this.clock() + Math.min(input.ttl_ms || DEFAULT_AUTH_TTL_MS, DEFAULT_AUTH_TTL_MS)).toISOString();
-      this.transaction(() => this.db.prepare("INSERT INTO authorizations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+      const controlDigest = input.control_request_digest || requestDigest("request_authorization", input, ["flow_id", "expected_revision", "action", "target", "environment", "request_digest", "ttl_ms"]);
+      this.transaction(() => this.db.prepare(`INSERT INTO authorizations
+        (authorization_id,flow_id,action,target,environment,request_digest,control_request_digest,expires_at,nonce,challenge_digest,
+         confirmed_by,confirmed_at,confirmed_request_digest,consumed_at,consumed_request_digest,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
         authorizationId,
         row.flow_id,
         input.action,
         input.target,
         input.environment,
         input.request_digest,
+        controlDigest,
         expiresAt,
         nonce,
         sha256(challenge),
         null,
         null,
         null,
+        null,
+        null,
         nowIso(this.clock)
       ));
-      return ok({ authorization_id: authorizationId, expires_at: expiresAt, confirmation: { mode: input.elicitation_supported ? "elicitation" : "challenge", challenge_code: input.elicitation_supported ? void 0 : challenge, prompt: `Authorize ${input.action} on ${input.target} in ${input.environment}` } });
+      return ok({ authorization_id: authorizationId, expires_at: expiresAt, control_request_digest: controlDigest, confirmation: { mode: input.elicitation_supported ? "elicitation" : "challenge", challenge_code: challenge, prompt: `Authorize ${input.action} on ${input.target} in ${input.environment}` } });
     } catch (error2) {
       return fail("authorization_request_failed", error2.message);
     }
@@ -21986,14 +22134,20 @@ var DeliveryControl = class {
     if (input.mode === "challenge" && sha256(String(input.challenge_code || "").toUpperCase()) !== auth.challenge_digest) return fail("challenge_mismatch", "challenge code does not match");
     if (input.mode !== "challenge" && input.mode !== "elicitation") return fail("confirmation_required", "confirmation must come from elicitation or challenge mode");
     const confirmedBy = input.confirmed_by || (input.mode === "elicitation" ? "mcp-elicitation" : "user-challenge");
-    this.transaction(() => this.db.prepare("UPDATE authorizations SET confirmed_by=?,confirmed_at=? WHERE authorization_id=? AND confirmed_at IS NULL").run(confirmedBy, nowIso(this.clock), auth.authorization_id));
-    return ok({ authorization_id: auth.authorization_id, confirmed: true, expires_at: auth.expires_at });
+    const controlDigest = input.control_request_digest || requestDigest("confirm_authorization", input, ["flow_id", "expected_revision", "authorization_id", "request_digest", "mode", "confirmed_by"]);
+    const confirmedAt = nowIso(this.clock);
+    this.transaction(() => this.db.prepare("UPDATE authorizations SET confirmed_by=?,confirmed_at=?,confirmed_request_digest=? WHERE authorization_id=? AND confirmed_at IS NULL").run(confirmedBy, confirmedAt, controlDigest, auth.authorization_id));
+    return ok({ authorization_id: auth.authorization_id, confirmed: true, expires_at: auth.expires_at, control_request_digest: controlDigest });
   }
   consumeAuthorization(input) {
     const flow = this.row(input.flow_id);
     if (!flow) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
     if (flow.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: flow.revision });
-    if (JSON.parse(flow.authorization_receipts_json || "[]").some((receipt2) => receipt2.authorization_id === input.authorization_id)) return fail("authorization_replayed", "authorization has already been consumed");
+    const existingReceipts = JSON.parse(flow.authorization_receipts_json || "[]");
+    if (existingReceipts.some((receipt2) => receipt2.authorization_id === input.authorization_id)) {
+      this.transaction(() => this.db.prepare("UPDATE authorizations SET consumed_at=COALESCE(consumed_at,?),consumed_request_digest=COALESCE(consumed_request_digest,?) WHERE authorization_id=?").run(nowIso(this.clock), input.control_request_digest || requestDigest("consume_authorization", input, ["flow_id", "expected_revision", "authorization_id", "action", "target", "environment", "request_digest"]), input.authorization_id));
+      return fail("authorization_replayed", "authorization has already been consumed");
+    }
     const auth = this.db.prepare("SELECT * FROM authorizations WHERE authorization_id=? AND flow_id=?").get(input.authorization_id, input.flow_id);
     if (!auth) return fail("authorization_not_found", "authorization request not found");
     if (!auth.confirmed_at) return fail("authorization_unconfirmed", "authorization has not been confirmed");
@@ -22001,13 +22155,14 @@ var DeliveryControl = class {
     if (Date.parse(auth.expires_at) <= this.clock()) return fail("authorization_expired", "authorization expired");
     for (const field of ["action", "target", "environment", "request_digest"]) if (input[field] !== auth[field]) return fail("authorization_scope_mismatch", `${field} does not match authorization scope`);
     const consumedAt = nowIso(this.clock);
-    const receipt = { authorization_id: auth.authorization_id, flow_id: auth.flow_id, action: auth.action, target: auth.target, environment: auth.environment, request_digest: auth.request_digest, confirmed_by: auth.confirmed_by, confirmed_at: auth.confirmed_at, consumed_at: consumedAt };
+    const controlDigest = input.control_request_digest || requestDigest("consume_authorization", input, ["flow_id", "expected_revision", "authorization_id", "action", "target", "environment", "request_digest"]);
+    const receipt = { authorization_id: auth.authorization_id, flow_id: auth.flow_id, action: auth.action, target: auth.target, environment: auth.environment, request_digest: auth.request_digest, control_request_digest: controlDigest, confirmed_by: auth.confirmed_by, confirmed_at: auth.confirmed_at, consumed_at: consumedAt };
     const receipts = JSON.parse(flow.authorization_receipts_json || "[]");
-    const committed = this.commitTransition({ flow_id: flow.flow_id, expected_revision: flow.revision, request_digest: input.request_digest, event: "authorization-consumed", reason: `consume authorization ${auth.authorization_id}`, patch: { authorization_receipts: [...receipts, receipt] } });
+    const committed = this.commitTransition({ flow_id: flow.flow_id, expected_revision: flow.revision, request_digest: controlDigest, event: "authorization-consumed", reason: `consume authorization ${auth.authorization_id}`, patch: { authorization_receipts: [...receipts, receipt] } });
     if (!committed.ok) return committed;
     let changed;
     this.transaction(() => {
-      changed = this.db.prepare("UPDATE authorizations SET consumed_at=? WHERE authorization_id=? AND consumed_at IS NULL").run(consumedAt, auth.authorization_id).changes;
+      changed = this.db.prepare("UPDATE authorizations SET consumed_at=?,consumed_request_digest=? WHERE authorization_id=? AND consumed_at IS NULL").run(consumedAt, controlDigest, auth.authorization_id).changes;
     });
     if (changed !== 1) return fail("authorization_replayed", "authorization has already been consumed");
     return ok({ receipt, flow: committed.flow });
@@ -22025,12 +22180,24 @@ var DeliveryControl = class {
     const requiredActions = JSON.parse(row.external_actions_json || "[]");
     const receipts = JSON.parse(row.authorization_receipts_json || "[]");
     for (const action of requiredActions) {
-      const found = receipts.find((receipt) => receipt.action === action.action && receipt.target === action.target && receipt.environment === action.environment && receipt.consumed_at);
-      if (!found) unmet.push({ kind: "authorization", action });
+      const found = action.request_digest && receipts.find((receipt) => receipt.action === action.action && receipt.target === action.target && receipt.environment === action.environment && receipt.request_digest === action.request_digest && receipt.consumed_at);
+      if (!action.request_digest) unmet.push({ kind: "authorization-scope", action, reason: "external action has no request_digest" });
+      else if (!found) unmet.push({ kind: "authorization", action });
     }
-    if (input.terminal_observed !== true) unmet.push({ kind: "terminal-condition", terminal_condition: row.terminal_condition });
+    const gates = JSON.parse(row.gate_json || '{"review_findings":[],"terminal_observation":null}');
+    const rawObservation = input.terminal_observation || gates.terminal_observation;
+    const observation = rawObservation ? { ...rawObservation, artifact: artifactPath(row.plan_root, rawObservation.artifact) } : null;
+    if (!observation) unmet.push({ kind: "terminal-condition", terminal_condition: row.terminal_condition, reason: "terminal_observation evidence is required" });
+    else {
+      const terminalEvidence = (evidence.evidence || []).find((item) => item.evidence_id === observation.evidence_id && item.artifact === observation.artifact && item.artifact_digest === observation.artifact_digest);
+      if (!terminalEvidence) unmet.push({ kind: "terminal-observation-evidence", evidence_id: observation.evidence_id });
+    }
+    for (const finding of gates.review_findings || []) {
+      if (finding.disposition === "open") unmet.push({ kind: "review-finding", finding_id: finding.finding_id, severity: finding.severity });
+      if (["P0", "P1"].includes(finding.severity) && (finding.disposition !== "fixed" || !finding.reverified_by)) unmet.push({ kind: "review-reverification", finding_id: finding.finding_id, disposition: finding.disposition });
+    }
     if (unmet.length || evidence.ok && evidence.invalid_evidence.length) return fail("completion_gate_failed", "flow cannot close until every gate passes", { unmet_criteria: unmet, invalid_evidence: evidence.ok ? evidence.invalid_evidence : [] });
-    return this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, event: "terminal-verified", reason: input.reason || "terminal condition and all delivery gates verified", request_digest: input.request_digest, patch: { status: "complete", current_phase: "close", next_phase: "none", resume_point: "Terminal evidence verified; no remaining work" } });
+    return this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, event: "terminal-verified", reason: input.reason || "terminal condition and all delivery gates verified", request_digest: input.request_digest, patch: { status: "complete", current_phase: "close", next_phase: "none", terminal_observation: observation, resume_point: "Terminal evidence verified; no remaining work" } });
   }
   cancelFlow(input) {
     return this.commitTransition({ ...input, event: "user-cancelled", reason: input.reason || "cancelled by user", patch: { ...input.patch || {}, status: "cancelled", next_phase: "none" } });
@@ -22068,9 +22235,11 @@ var statePatch = external_exports.object({
   next_phase: external_exports.enum(["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close", "none"]).optional(),
   terminal_condition: external_exports.string().min(1).optional(),
   resume_point: external_exports.string().min(1).optional(),
+  terminal_observation: external_exports.object({ evidence_id: external_exports.string().min(1), artifact: external_exports.string().min(1), artifact_digest: digest, observed_at: external_exports.string().datetime(), result: external_exports.enum(["passed", "verified", "accepted", "observed"]) }).nullable().optional(),
+  review_findings: external_exports.array(external_exports.object({ finding_id: external_exports.string().min(1), severity: external_exports.enum(["P0", "P1", "P2", "P3"]), disposition: external_exports.enum(["open", "fixed", "accepted", "deferred"]), reason: external_exports.string().optional(), reverified_by: external_exports.string().optional() })).optional(),
   acceptance_criteria: external_exports.array(external_exports.object({ acceptance_id: external_exports.string().min(1), description: external_exports.string().min(1) })).optional(),
   required_evidence_types: external_exports.array(external_exports.string().min(1)).optional(),
-  external_actions: external_exports.array(external_exports.object({ action: external_exports.string(), target: external_exports.string(), environment: external_exports.string() })).optional(),
+  external_actions: external_exports.array(external_exports.object({ action: external_exports.string(), target: external_exports.string(), environment: external_exports.string(), request_digest: digest.optional() })).optional(),
   correlation_id: external_exports.string().nullable().optional(),
   receipt_digest: external_exports.string().nullable().optional()
 }).passthrough();
@@ -22081,15 +22250,31 @@ register("initialize_flow", "Initialize delivery flow", "Create or import one du
   plan_root: external_exports.string().min(1),
   plan_target: external_exports.string().min(1),
   flow: external_exports.enum(["main", "bug", "triage", "wayfinder", "maintenance", "direct"]).default("main"),
-  current_phase: external_exports.string().default("route"),
-  next_phase: external_exports.string().default("clarify"),
+  current_phase: external_exports.enum(["route"]).default("route"),
+  next_phase: external_exports.enum(["clarify"]).default("clarify"),
   terminal_condition: external_exports.string().min(1),
   resume_point: external_exports.string().min(1),
   acceptance_criteria: external_exports.array(external_exports.object({ acceptance_id: external_exports.string().min(1), description: external_exports.string().min(1) })).default([]),
   required_evidence_types: external_exports.array(external_exports.string()).default([]),
-  external_actions: external_exports.array(external_exports.object({ action: external_exports.string(), target: external_exports.string(), environment: external_exports.string() })).default([]),
+  external_actions: external_exports.array(external_exports.object({ action: external_exports.string(), target: external_exports.string(), environment: external_exports.string(), request_digest: digest })).default([]),
   correlation_id: external_exports.string().optional()
 }, false, (input) => controller.initializeFlow(input));
+register("start_or_resume_flow", "Start or resume delivery flow", "Initialize a new route-bound flow or recover an existing flow from its authoritative Plan Tree state.", {
+  flow_id: flowId.optional(),
+  expected_revision: revision.default(0),
+  request_digest: digest,
+  plan_root: external_exports.string().min(1),
+  plan_target: external_exports.string().min(1),
+  flow: external_exports.enum(["main", "bug", "triage", "wayfinder", "maintenance", "direct"]).default("main"),
+  current_phase: external_exports.enum(["route"]).default("route"),
+  next_phase: external_exports.enum(["clarify"]).default("clarify"),
+  terminal_condition: external_exports.string().min(1),
+  resume_point: external_exports.string().min(1),
+  acceptance_criteria: external_exports.array(external_exports.object({ acceptance_id: external_exports.string().min(1), description: external_exports.string().min(1) })).default([]),
+  required_evidence_types: external_exports.array(external_exports.string()).default([]),
+  external_actions: external_exports.array(external_exports.object({ action: external_exports.string(), target: external_exports.string(), environment: external_exports.string(), request_digest: digest })).default([]),
+  correlation_id: external_exports.string().optional()
+}, false, (input) => controller.startOrResumeFlow(input));
 register("inspect_flow", "Inspect delivery flow", "Read the current transaction-controlled flow state.", { flow_id: flowId }, true, ({ flow_id }) => controller.inspectFlow(flow_id));
 register("select_route", "Select workflow route", "Persist the selected Ask Matt procedure, route reason, confidence, and skipped phases.", {
   flow_id: flowId,
@@ -22098,6 +22283,9 @@ register("select_route", "Select workflow route", "Persist the selected Ask Matt
   why: external_exports.string().min(1),
   skipped_phases: external_exports.array(external_exports.string()).default([]),
   confidence: external_exports.enum(["high", "medium", "low"]).default("high"),
+  setup_required: external_exports.boolean().default(false),
+  approved_spec: external_exports.boolean().default(false),
+  confirmed: external_exports.boolean().default(false),
   request_digest: digest,
   reason: external_exports.string().optional()
 }, false, (input) => controller.selectRoute(input));
@@ -22119,6 +22307,16 @@ register("commit_transition", "Commit flow transition", "Commit one CAS-protecte
   lease_ms: external_exports.number().int().positive().optional(),
   patch: statePatch
 }, false, (input) => controller.commitTransition(input));
+register("advance_flow", "Advance delivery flow", "Commit one validated phase transition and return the next native Plan projection in the same high-level operation.", {
+  flow_id: flowId,
+  expected_revision: revision,
+  event: external_exports.string().min(1),
+  reason: external_exports.string().min(1),
+  request_digest: digest,
+  lease_owner: external_exports.string().optional(),
+  lease_ms: external_exports.number().int().positive().optional(),
+  patch: statePatch
+}, false, (input) => controller.advanceFlow(input));
 register("recover_flow", "Recover delivery flow", "Reconcile crash journals or rebuild a missing local controller database record from authoritative Plan Tree state.", {
   flow_id: flowId,
   expected_revision: revision,
@@ -22128,6 +22326,13 @@ register("recover_flow", "Recover delivery flow", "Reconcile crash journals or r
   lease_owner: external_exports.string().optional(),
   lease_ms: external_exports.number().int().positive().optional()
 }, false, (input) => controller.recoverFlow(input));
+register("resolve_drift", "Resolve Plan Tree drift", "Clear a frozen flow only after the user confirms the restored Plan Tree and the controller digest matches exactly.", {
+  flow_id: flowId,
+  expected_revision: revision,
+  request_digest: digest,
+  resolution: external_exports.literal("accept-restored-plan-tree"),
+  reason: external_exports.string().min(1)
+}, false, (input) => controller.resolveDrift(input));
 register("project_native_plan", "Project native Codex plan", "Generate a revisioned current-session native Plan projection from durable flow state.", {
   flow_id: flowId,
   expected_revision: revision,
@@ -22169,6 +22374,19 @@ register("validate_evidence", "Record and validate evidence", "Optionally record
   }
   return controller.validateEvidence(input);
 });
+register("record_delivery_evidence", "Record delivery evidence", "Record one evidence item and immediately return the current completion gate assessment.", {
+  flow_id: flowId,
+  expected_revision: revision,
+  request_digest: digest,
+  evidence: evidenceSchema
+}, false, (input) => controller.recordDeliveryEvidence(input));
+register("record_review_findings", "Record review dispositions", "Persist review findings and their fixed, accepted, or deferred dispositions as a revision-bound gate artifact.", {
+  flow_id: flowId,
+  expected_revision: revision,
+  request_digest: digest,
+  review_findings: external_exports.array(external_exports.object({ finding_id: external_exports.string().min(1), severity: external_exports.enum(["P0", "P1", "P2", "P3"]), disposition: external_exports.enum(["open", "fixed", "accepted", "deferred"]), reason: external_exports.string().optional(), reverified_by: external_exports.string().optional() })),
+  reason: external_exports.string().optional()
+}, false, (input) => controller.recordReviewFindings(input));
 register("request_authorization", "Request scoped authorization", "Create a short-lived, single-use authorization for one controlled external action and request structured confirmation when supported.", {
   flow_id: flowId,
   expected_revision: revision,
@@ -22176,6 +22394,7 @@ register("request_authorization", "Request scoped authorization", "Create a shor
   target: external_exports.string().min(1),
   environment: external_exports.string().min(1),
   request_digest: digest,
+  control_request_digest: digest.optional(),
   ttl_ms: external_exports.number().int().positive().max(3e5).optional()
 }, false, async (input) => {
   const supports = Boolean(server.server.getClientCapabilities()?.elicitation?.form);
@@ -22190,13 +22409,14 @@ register("request_authorization", "Request scoped authorization", "Create a shor
     if (result.action !== "accept" || result.content?.authorize !== true) return { ok: false, error: { code: "authorization_declined", message: "User did not authorize the action" } };
     return controller.confirmAuthorization({ flow_id: input.flow_id, expected_revision: input.expected_revision, request_digest: input.request_digest, authorization_id: requested.authorization_id, mode: "elicitation", confirmed_by: "mcp-elicitation" });
   } catch {
-    return controller.requestAuthorization({ ...input, elicitation_supported: false });
+    return { ...requested, confirmation: { ...requested.confirmation, mode: "challenge", challenge_code: requested.confirmation.challenge_code } };
   }
 });
 register("confirm_authorization", "Confirm authorization challenge", "Confirm a pending authorization using the short-lived challenge fallback returned to the user.", {
   flow_id: flowId,
   expected_revision: revision,
   request_digest: digest,
+  control_request_digest: digest.optional(),
   authorization_id: external_exports.string().min(1),
   mode: external_exports.literal("challenge"),
   challenge_code: external_exports.string().min(1),
@@ -22209,17 +22429,27 @@ register("consume_authorization", "Consume scoped authorization", "Atomically co
   action: external_exports.string().min(1),
   target: external_exports.string().min(1),
   environment: external_exports.string().min(1),
-  request_digest: digest
+  request_digest: digest,
+  control_request_digest: digest.optional()
 }, false, (input) => controller.consumeAuthorization(input));
 register("audit_consistency", "Audit delivery consistency", "Compare Plan Tree, journal, lock, and controller digests without changing state.", { flow_id: flowId }, true, ({ flow_id }) => controller.auditConsistency(flow_id));
 register("get_metrics", "Get redacted workflow metrics", "Return aggregate flow and transition counts without prompts, credentials, payloads, or project content.", {}, true, () => controller.getMetrics());
 register("close_flow", "Close verified flow", "Set complete only after consistency, native Plan, evidence, authorization, and terminal-condition gates pass.", {
   flow_id: flowId,
   expected_revision: revision,
-  terminal_observed: external_exports.boolean(),
+  terminal_observed: external_exports.boolean().optional(),
+  terminal_observation: external_exports.object({ evidence_id: external_exports.string().min(1), artifact: external_exports.string().min(1), artifact_digest: digest, observed_at: external_exports.string().datetime(), result: external_exports.enum(["passed", "verified", "accepted", "observed"]) }).optional(),
   reason: external_exports.string().optional(),
   request_digest: digest
 }, false, (input) => controller.closeFlow(input));
+register("close_verified_flow", "Close verified delivery flow", "High-level completion entry point that applies all evidence, review, authorization, consistency, and terminal observation gates.", {
+  flow_id: flowId,
+  expected_revision: revision,
+  terminal_observed: external_exports.boolean().optional(),
+  terminal_observation: external_exports.object({ evidence_id: external_exports.string().min(1), artifact: external_exports.string().min(1), artifact_digest: digest, observed_at: external_exports.string().datetime(), result: external_exports.enum(["passed", "verified", "accepted", "observed"]) }).optional(),
+  reason: external_exports.string().optional(),
+  request_digest: digest
+}, false, (input) => controller.closeVerifiedFlow(input));
 register("cancel_flow", "Cancel delivery flow", "Persist a user cancellation and safe resume boundary without deleting state or evidence.", {
   flow_id: flowId,
   expected_revision: revision,

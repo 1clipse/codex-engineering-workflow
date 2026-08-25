@@ -100,6 +100,7 @@ $evidenceToolFile = Join-Path $WorkflowRoot 'scripts\validate-evidence.ps1'
 $routeRecordToolFile = Join-Path $WorkflowRoot 'scripts\route-record.ps1'
 $metricsToolFile = Join-Path $WorkflowRoot 'scripts\metrics.ps1'
 $upgradeTestFile = Join-Path $WorkflowRoot 'scripts\test-upgrades.ps1'
+$policySyncFile = Join-Path $WorkflowRoot 'scripts\sync-policy.ps1'
 if (-not $DeliveryPluginRoot) {
     $profileRoot = Split-Path (Split-Path $SkillsRoot -Parent) -Parent
     $DeliveryPluginRoot = Join-Path $profileRoot 'plugins\delivery-control'
@@ -108,6 +109,7 @@ $deliveryManifestFile = Join-Path $DeliveryPluginRoot '.codex-plugin\plugin.json
 $deliveryMcpFile = Join-Path $DeliveryPluginRoot '.mcp.json'
 $deliverySkillFile = Join-Path $DeliveryPluginRoot 'skills\delivery-control\SKILL.md'
 $deliveryServerFile = Join-Path $DeliveryPluginRoot 'dist\server.mjs'
+$deliveryPolicyFile = Join-Path $DeliveryPluginRoot 'schemas\workflow-policy.json'
 if (-not $AgentsFile) { $AgentsFile = Join-Path (Split-Path $SkillsRoot -Parent) 'AGENTS.md' }
 if (-not $ProductDesignRoot) {
     $pluginRoot = Join-Path (Split-Path $SkillsRoot -Parent) 'plugins\cache\openai-curated-remote\product-design'
@@ -119,6 +121,7 @@ if (-not $ProductDesignRoot) {
 
 $workflow = Read-Text $workflowFile 'engineering-workflow SKILL.md'
 $stateMachine = Read-Json $stateMachineFile 'workflow state-machine contract'
+$deliveryPolicy = Read-Json $deliveryPolicyFile 'Delivery Control workflow policy'
 $compatibility = Read-Json $compatibilityFile 'workflow compatibility contract'
 $routeCases = Read-Json $routeCasesFile 'workflow route cases'
 $nativePlan = Read-Json $nativePlanFile 'native Plan contract'
@@ -146,11 +149,14 @@ if ($frontmatter) {
 }
 
 if ($workflow) {
-    $contractFields = @('flow_id', 'revision', 'flow', 'status', 'current_phase', 'next_phase', 'plan_target', 'terminal_condition', 'resume_point')
+    $contractFields = @('flow_id', 'revision', 'flow', 'status', 'current_phase', 'next_phase', 'plan_target', 'terminal_condition', 'resume_point', 'terminal_observation', 'review_findings', 'request_digest')
     foreach ($field in $contractFields) {
         if ($workflow.IndexOf($field, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
             Add-Fatal "Flow contract field is missing: $field"
         }
+    }
+    foreach ($signal in @('start_or_resume_flow', 'advance_flow', 'record_delivery_evidence', 'record_review_findings', 'close_verified_flow', 'skipped phases', 'request digest')) {
+        if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { Add-Fatal "Workflow upgrade contract is missing: $signal" }
     }
 
     $transitionSignals = @('SPEC NOT READY', 'Several frontier tickets', 'blocked-external', 'partial', 'failed fork', 'P0/P1', 'scope or architecture change', 'User cancellation', 'complete/close/none')
@@ -217,6 +223,11 @@ if ($deliveryServer) {
         if ($deliveryServer.IndexOf($tool, [System.StringComparison]::Ordinal) -lt 0) { Add-Fatal "Delivery Control MCP tool is missing: $tool" }
     }
 }
+if ($stateMachine -and $deliveryPolicy) {
+    $canonicalPolicy = (Get-Content -LiteralPath $stateMachineFile -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 30 -Compress)
+    $bundledPolicy = (Get-Content -LiteralPath $deliveryPolicyFile -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 30 -Compress)
+    if ($canonicalPolicy -ne $bundledPolicy) { Add-Fatal 'Delivery Control policy copy differs from the canonical workflow state-machine.json; run sync-policy.ps1.' }
+}
 if ($bridgeToolFile -and (Read-Text $bridgeToolFile 'legacy Plan Tree bridge') -notmatch 'Legacy Plan Tree writes are disabled') { Add-Fatal 'Legacy Plan Tree bridge still exposes a write path.' }
 
 if ($stateMachine) {
@@ -240,9 +251,18 @@ if ($stateMachine) {
             Add-Fatal "State-machine phase transition set is missing: $phase"
         }
     }
+    if (-not $stateMachine.required_phase_skip_exceptions) {
+        Add-Fatal 'State-machine required_phase_skip_exceptions is missing.'
+    } elseif ([string]$stateMachine.required_phase_skip_exceptions.spec -ne 'approved_spec') {
+        Add-Fatal 'State-machine spec skip exception must be approved_spec.'
+    }
+    foreach ($flow in @('main', 'bug', 'triage', 'wayfinder', 'maintenance', 'direct')) {
+        $requiredProperty = $stateMachine.required_phases_by_flow.PSObject.Properties[$flow]
+        if (-not $requiredProperty) { Add-Fatal "State-machine required phase set is missing: $flow" }
+    }
     foreach ($event in @('advance', 'route-selected', 'spec-not-ready', 'several-frontiers', 'user-decision-needed',
             'external-blocker', 'partial-result', 'execution-blocked', 'unrecoverable-failure',
-            'review-p0-p1', 'scope-change', 'user-cancelled', 'user-resumed', 'terminal-verified')) {
+            'review-p0-p1', 'review-recorded', 'scope-change', 'user-cancelled', 'user-resumed', 'terminal-verified')) {
         if (-not $stateMachine.event_rules.PSObject.Properties[$event]) {
             Add-Fatal "State-machine event rule is missing: $event"
         }
@@ -300,6 +320,7 @@ if ($nativePlan) {
     if ([string]$nativePlan.scope -notmatch 'current-session-only' -or @($nativePlan.handshake).Count -ne 3) {
         Add-Fatal 'Native Plan contract must define the projection/update_plan/confirmation handshake.'
     }
+    if (-not $nativePlan.projection_scope) { Add-Fatal 'Native Plan contract must define projection_scope.' }
     foreach ($phase in @('route', 'setup', 'clarify', 'prototype', 'spec', 'tickets', 'goal', 'execute', 'review', 'close')) {
         if (-not $nativePlan.phase_mapping.PSObject.Properties[$phase]) { Add-Fatal "Native Plan mapping is missing phase: $phase" }
     }
@@ -332,7 +353,7 @@ if (-not (Test-Path -LiteralPath $stateToolFile -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $stateTestFile -PathType Leaf)) {
     Add-Fatal "Workflow state regression test is missing: $stateTestFile"
 }
-foreach ($toolFile in @($nativePlanToolFile, $bridgeToolFile, $evidenceToolFile, $routeRecordToolFile, $metricsToolFile, $upgradeTestFile)) {
+foreach ($toolFile in @($nativePlanToolFile, $bridgeToolFile, $evidenceToolFile, $routeRecordToolFile, $metricsToolFile, $upgradeTestFile, $policySyncFile)) {
     if (-not (Test-Path -LiteralPath $toolFile -PathType Leaf)) { Add-Fatal "Workflow upgrade tool is missing: $toolFile" }
     else {
         $toolParseErrors = $null
