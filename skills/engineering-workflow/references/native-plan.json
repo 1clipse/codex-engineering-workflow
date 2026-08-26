@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0.0",
   "authority": "Plan Tree",
-  "scope": "Codex native task plan is current-session-only",
+  "scope": "Host-native task plan is current-session-only",
   "projection_scope": "current phase plus all remaining non-skipped phases through close",
   "phase_mapping": {
     "route": "Inspect context and choose the delivery route",
@@ -15,13 +15,13 @@
     "review": "Review against the recorded fixed point and resolve findings",
     "close": "Verify the terminal condition and report final state"
   },
-  "handshake": ["project_native_plan", "Codex update_plan", "confirm_native_plan"],
+  "handshake": ["project_native_plan", "apply host plan when supported", "confirm_native_plan"],
   "required_projection_fields": ["projection_id", "projection_revision", "flow_id", "flow_revision", "digest", "steps"],
   "rules": [
-    "A phase transition requires a confirmed projection revision.",
+    "A phase transition requires a confirmed host-plan projection revision when the host supports it.",
     "Projection includes the remaining route, not only the current and next phase.",
     "A stale or mismatched confirmation is rejected.",
-    "When update_plan is unavailable, record plan_sync unavailable with an explicit handoff.",
-    "Native Plan completion is not a delivery receipt."
+    "When a host plan is unavailable, record plan_sync unavailable with an explicit handoff.",
+    "Host-plan completion is not a delivery receipt."
   ]
 }

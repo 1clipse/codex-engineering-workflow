@@ -1,6 +1,4 @@
-import { readFileSync } from "node:fs";
-
-const POLICY = JSON.parse(readFileSync(new URL("../schemas/workflow-policy.json", import.meta.url), "utf8"));
+import { POLICY } from "./policy.generated.mjs";
 
 export const FLOW_VALUES = POLICY.flows;
 export const STATUS_VALUES = POLICY.statuses;
@@ -10,7 +8,7 @@ export const STATE_START = "<!-- delivery-control:state:start -->";
 export const STATE_END = "<!-- delivery-control:state:end -->";
 export const LEGACY_START = "<!-- engineering-workflow:state:start -->";
 export const LEGACY_END = "<!-- engineering-workflow:state:end -->";
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 5;
 export const DEFAULT_BACKUP_RETENTION = 5;
 export const DEFAULT_LEASE_MS = 30_000;
 export const DEFAULT_AUTH_TTL_MS = 5 * 60_000;
@@ -39,3 +37,4 @@ export const EVENT_RULES = POLICY.event_rules;
 export const PHASE_ORDER = POLICY.phase_order;
 export const REQUIRED_PHASES_BY_FLOW = POLICY.required_phases_by_flow;
 export const REQUIRED_PHASE_SKIP_EXCEPTIONS = POLICY.required_phase_skip_exceptions || {};
+export const ROUTE_TEMPLATES = POLICY.route_templates;

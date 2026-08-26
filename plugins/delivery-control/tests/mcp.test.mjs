@@ -29,11 +29,24 @@ test("bundled stdio MCP exposes the complete stable tool surface", async () => {
     const listed = await client.listTools();
     const names = listed.tools.map((tool) => tool.name).sort();
     const expected = [
-      "advance_flow", "audit_consistency", "cancel_flow", "close_flow", "close_verified_flow", "commit_transition", "confirm_authorization",
-      "confirm_native_plan", "consume_authorization", "get_metrics", "initialize_flow", "inspect_flow", "project_native_plan", "propose_transition",
-      "record_delivery_evidence", "record_review_findings", "recover_flow", "request_authorization", "resolve_drift", "select_route", "start_or_resume_flow", "validate_evidence"
+      "advance_phase", "audit_consistency", "cancel_flow", "close_flow", "confirm_authorization",
+      "confirm_native_plan", "consume_authorization", "get_metrics", "initialize_flow", "inspect_flow", "project_native_plan",
+      "record_delivery_evidence", "record_external_action_result", "record_review_findings", "recover_flow", "request_authorization", "resolve_drift", "revise_scope", "select_route", "start_or_resume_flow", "validate_evidence"
     ].sort();
     assert.deepEqual(names, expected);
+
+    const byName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
+    assert.equal(byName.select_route.inputSchema.properties.skipped_phases, undefined, "select_route must derive skipped phases");
+    assert.equal(byName.select_route.inputSchema.properties.next_phase, undefined, "select_route must derive next_phase");
+    assert.equal(byName.cancel_flow.inputSchema.properties.patch, undefined, "cancel_flow must not expose arbitrary state patches");
+
+    const actionResultInput = byName.record_external_action_result.inputSchema;
+    assert.ok(actionResultInput.required.includes("result"), "record_external_action_result must require result");
+    const actionResultRequired = actionResultInput.properties.result.required;
+    for (const field of ["artifact", "artifact_digest", "command_or_request_id"]) {
+      assert.ok(actionResultRequired.includes(field), `external action result must require ${field}`);
+    }
+
     for (const tool of listed.tools) {
       assert.equal(typeof tool.annotations?.readOnlyHint, "boolean", `${tool.name} missing readOnlyHint`);
       assert.equal(tool.annotations?.openWorldHint, false, `${tool.name} must remain local-only`);

@@ -1,8 +1,10 @@
 param(
     [string]$SourceSkillsRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
+    [string]$SourceWorkflowRoot = (Split-Path $PSScriptRoot -Parent),
     [string]$SourceAgentsFile = (Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'AGENTS.md'),
     [string]$SourceProductDesignRoot,
-    [string]$SourceDeliveryPluginRoot = (Join-Path (Split-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) -Parent) 'plugins\delivery-control')
+    [string]$SourceDeliveryPluginRoot = (Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'plugins\delivery-control'),
+    [string]$SourceAdaptersRoot = (Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'adapters')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +13,7 @@ $fixtureSkills = Join-Path $testRoot 'skills'
 $fixtureAgents = Join-Path $testRoot 'AGENTS.md'
 $fixtureDesign = Join-Path $testRoot 'product-design'
 $fixturePlugin = Join-Path $testRoot 'delivery-control'
+$fixtureAdapters = Join-Path $testRoot 'adapters'
 $failures = New-Object System.Collections.Generic.List[string]
 
 function Restore-Text([string]$Path, [string]$Content) {
@@ -21,7 +24,7 @@ function Invoke-Validator {
     $validator = Join-Path $fixtureSkills 'engineering-workflow\scripts\validate.ps1'
     $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $validator `
         -SkillsRoot $fixtureSkills -WorkflowRoot (Join-Path $fixtureSkills 'engineering-workflow') `
-        -AgentsFile $fixtureAgents -ProductDesignRoot $fixtureDesign -DeliveryPluginRoot $fixturePlugin 2>&1)
+        -AgentsFile $fixtureAgents -ProductDesignRoot $fixtureDesign -DeliveryPluginRoot $fixturePlugin -AdaptersRoot $fixtureAdapters 2>&1)
     [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output -join "`n") }
 }
 
@@ -35,16 +38,24 @@ function Assert-Case([string]$Name, [scriptblock]$Mutate, [string]$Pattern) {
 
 try {
     [void][IO.Directory]::CreateDirectory($fixtureSkills)
+    if (-not (Test-Path -LiteralPath (Join-Path $SourceSkillsRoot 'ask-matt\SKILL.md') -PathType Leaf)) {
+        $globalSkills = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\skills'
+        if (Test-Path -LiteralPath (Join-Path $globalSkills 'ask-matt\SKILL.md') -PathType Leaf) { $SourceSkillsRoot = $globalSkills }
+    }
     if (-not $SourceProductDesignRoot) {
         $root = Join-Path (Split-Path $SourceSkillsRoot -Parent) 'plugins\cache\openai-curated-remote\product-design'
         $SourceProductDesignRoot = (Get-ChildItem $root -Directory | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).FullName
     }
     Copy-Item $SourceProductDesignRoot $fixtureDesign -Recurse
     Copy-Item $SourceDeliveryPluginRoot $fixturePlugin -Recurse
+    Copy-Item $SourceAdaptersRoot $fixtureAdapters -Recurse
     $askMatt = Get-Content (Join-Path $SourceSkillsRoot 'ask-matt\SKILL.md') -Raw
     $skills = @([regex]::Matches($askMatt, '`/(?<name>[a-z][a-z0-9-]+)(?:\s[^`]*)?`') | ForEach-Object { $_.Groups['name'].Value } | Where-Object { $_ -notin @('clear','compact') } | Sort-Object -Unique)
     $skills += @('ask-matt','plan-tree','engineering-workflow')
-    foreach ($skill in @($skills | Sort-Object -Unique)) { Copy-Item (Join-Path $SourceSkillsRoot $skill) (Join-Path $fixtureSkills $skill) -Recurse }
+    foreach ($skill in @($skills | Sort-Object -Unique)) {
+        $source = if ($skill -eq 'engineering-workflow') { $SourceWorkflowRoot } else { Join-Path $SourceSkillsRoot $skill }
+        Copy-Item $source (Join-Path $fixtureSkills $skill) -Recurse
+    }
     Copy-Item $SourceAgentsFile $fixtureAgents
 
     $baseline = Invoke-Validator
@@ -58,9 +69,10 @@ try {
     $mcpConfig = Join-Path $fixturePlugin '.mcp.json'
     $server = Join-Path $fixturePlugin 'dist\server.mjs'
     $bridge = Join-Path $fixtureSkills 'engineering-workflow\scripts\plan-tree-bridge.ps1'
+    $adapterCapabilities = Join-Path $fixtureAdapters 'host-capabilities.json'
     $designQa = Join-Path $fixtureDesign 'skills\design-qa\SKILL.md'
     $originals = @{}
-    foreach ($path in @($workflow,$ui,$version,$manifest,$mcpConfig,$server,$bridge,$fixtureAgents)) { $originals[$path] = Get-Content $path -Raw }
+    foreach ($path in @($workflow,$ui,$version,$manifest,$mcpConfig,$server,$bridge,$fixtureAgents,$adapterCapabilities)) { $originals[$path] = Get-Content $path -Raw }
 
     Move-Item $designQa "$designQa.missing"
     Assert-Case 'missing Product Design Skill' {} 'Product Design focused Skill is missing: design-qa'
@@ -76,7 +88,8 @@ try {
     Assert-Case 'bad UI metadata' { Restore-Text $ui "interface:`n  display_name: test`n" } 'interface.short_description'; Restore-Text $ui $originals[$ui]
     Assert-Case 'broken relative reference' { Restore-Text $workflow ($originals[$workflow] + "`n[bad](missing.md)`n") } 'Broken relative Markdown link'; Restore-Text $workflow $originals[$workflow]
     Assert-Case 'missing planning trigger boundary' { Restore-Text $workflow ($originals[$workflow].Replace('Use plan-tree directly','Route elsewhere')) } 'planning-only maintenance directly to plan-tree'; Restore-Text $workflow $originals[$workflow]
-    Assert-Case 'missing controller contract' { Restore-Text $workflow ($originals[$workflow].Replace('commit_transition','removed-transition')) } 'Workflow upgrade contract is missing: commit_transition'; Restore-Text $workflow $originals[$workflow]
+    Assert-Case 'missing JSON loader contract' { Restore-Text $workflow ($originals[$workflow].Replace('advance_phase','removed-transition')) } 'Workflow loader is missing: advance_phase'; Restore-Text $workflow $originals[$workflow]
+    Assert-Case 'adapter capability drift' { Restore-Text $adapterCapabilities ($originals[$adapterCapabilities].Replace('"codex"','"wrong"')) } 'Generated adapter host capabilities differ'; Restore-Text $adapterCapabilities $originals[$adapterCapabilities]
     Assert-Case 'invalid plugin identity' { Restore-Text $manifest ($originals[$manifest].Replace('"name": "delivery-control"','"name": "wrong"')) } 'manifest has the wrong name'; Restore-Text $manifest $originals[$manifest]
     Assert-Case 'unresolved MCP root' { Restore-Text $mcpConfig ($originals[$mcpConfig].Replace('./dist/server.mjs','${PLUGIN_ROOT}/dist/server.mjs')) } 'plugin-relative ./dist/server.mjs entrypoint'; Restore-Text $mcpConfig $originals[$mcpConfig]
     Assert-Case 'missing MCP tool' { Restore-Text $server ($originals[$server].Replace('consume_authorization','removed_authorization_tool')) } 'MCP tool is missing: consume_authorization'; Restore-Text $server $originals[$server]

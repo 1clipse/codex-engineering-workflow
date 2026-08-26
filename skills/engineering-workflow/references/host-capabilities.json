@@ -1,0 +1,92 @@
+{
+  "schema_version": "2.0.0",
+  "authority": "plugins/delivery-control/schemas/workflow-policy.json",
+  "hosts": {
+    "codex": {
+      "support": "native",
+      "entry": "codex-skill",
+      "mcp": "codex-plugin",
+      "plan_sync": "native",
+      "adapter": {
+        "format": "plugin",
+        "target": "plugins/delivery-control/.mcp.json"
+      }
+    },
+    "claude-code": {
+      "support": "native-mcp",
+      "entry": "claude-skill",
+      "mcp": "stdio",
+      "plan_sync": "handoff",
+      "adapter": {
+        "format": "json",
+        "target": ".mcp.json",
+        "template": {
+          "mcpServers": {
+            "delivery-control": {
+              "command": "node",
+              "args": [
+                "{SERVER_PATH}"
+              ],
+              "cwd": "{PROJECT_ROOT}"
+            }
+          }
+        }
+      }
+    },
+    "opencode": {
+      "support": "native-mcp",
+      "entry": "opencode-command",
+      "mcp": "stdio",
+      "plan_sync": "handoff",
+      "adapter": {
+        "format": "json",
+        "target": "opencode.json",
+        "template": {
+          "$schema": "https://opencode.ai/config.json",
+          "mcp": {
+            "delivery-control": {
+              "type": "local",
+              "command": [
+                "node",
+                "{SERVER_PATH}"
+              ],
+              "cwd": "{PROJECT_ROOT}",
+              "enabled": true
+            }
+          }
+        }
+      }
+    },
+    "pi": {
+      "support": "bridge",
+      "entry": "agent-skill",
+      "mcp": "pi-extension-bridge",
+      "plan_sync": "handoff",
+      "adapter": {
+        "format": "extension",
+        "target": ".pi/extensions/delivery-control/index.ts"
+      }
+    },
+    "dsh": {
+      "support": "native-mcp",
+      "entry": "agents-md",
+      "mcp": "stdio",
+      "plan_sync": "handoff",
+      "adapter": {
+        "format": "yaml",
+        "target": "cordis.yml",
+        "template": "- id: delivery-control\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    serverName: delivery-control\n    transport: stdio\n    command: node\n    args: ['{SERVER_PATH}']\n    cwd: '{PROJECT_ROOT}'\n"
+      }
+    },
+    "zcode": {
+      "support": "probe-required",
+      "entry": "agents-md",
+      "mcp": "unverified",
+      "plan_sync": "handoff",
+      "adapter": {
+        "format": "probe",
+        "target": "adapters/zcode/probe-zcode.ps1"
+      }
+    }
+  }
+}

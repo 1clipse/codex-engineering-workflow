@@ -1,10 +1,11 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "2.0.0",
   "delivery_control": {
-    "minimum_version": "1.0.0",
+    "minimum_version": "2.0.0",
     "plugin_name": "delivery-control",
-    "required_tools": ["initialize_flow", "start_or_resume_flow", "inspect_flow", "select_route", "propose_transition", "commit_transition", "advance_flow", "recover_flow", "project_native_plan", "confirm_native_plan", "validate_evidence", "record_delivery_evidence", "record_review_findings", "request_authorization", "confirm_authorization", "consume_authorization", "audit_consistency", "get_metrics", "close_flow", "close_verified_flow", "cancel_flow"]
+    "required_tools": ["initialize_flow", "start_or_resume_flow", "inspect_flow", "select_route", "advance_phase", "revise_scope", "recover_flow", "project_native_plan", "confirm_native_plan", "validate_evidence", "record_delivery_evidence", "record_review_findings", "record_external_action_result", "request_authorization", "confirm_authorization", "consume_authorization", "audit_consistency", "get_metrics", "close_flow", "cancel_flow"]
   },
+  "host_capabilities_file": "references/host-capabilities.json",
   "plan_tree": {
     "minimum_version": "0.4.0",
     "version_file": "plan-tree/VERSION"

@@ -1,265 +1,18 @@
 import { DatabaseSync } from "node:sqlite";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import {
-  DEFAULT_AUTH_TTL_MS, DEFAULT_BACKUP_RETENTION, DEFAULT_LEASE_MS, EVIDENCE_RESULTS, EVENT_RULES, FLOW_VALUES,
-  LEGACY_END, LEGACY_START, PHASE_LABELS, PHASE_ORDER, PHASE_VALUES, REQUIRED_PHASES_BY_FLOW, SCHEMA_VERSION,
-  PHASE_TRANSITIONS, REQUIRED_PHASE_SKIP_EXCEPTIONS, SENSITIVE_ACTIONS, STATE_END, STATE_START, STATUS_TRANSITIONS, STATUS_VALUES
+  DEFAULT_AUTH_TTL_MS, DEFAULT_LEASE_MS, EVIDENCE_RESULTS, PHASE_LABELS, PHASE_ORDER, SENSITIVE_ACTIONS
 } from "./constants.mjs";
-
-const ok = (value) => ({ ok: true, ...value });
-const fail = (code, message, details = {}) => ({ ok: false, error: { code, message, ...details } });
-const nowIso = (clock) => new Date(clock()).toISOString();
-const canonical = (value) => {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
-  return JSON.stringify(value);
-};
-export const sha256 = (value) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
-const requestDigest = (operation, input, fields) => sha256(canonical({
-  operation,
-  ...Object.fromEntries(fields.map((field) => [field, input[field]]))
-}));
-
-function assertString(value, name) {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`);
-  return value.trim();
-}
-
-function contained(root, target) {
-  const rootPath = resolve(assertString(root, "plan_root"));
-  const targetPath = resolve(assertString(target, "plan_target"));
-  const rel = relative(rootPath, targetPath);
-  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return { rootPath, targetPath };
-  throw new Error("plan_target must be inside plan_root");
-}
-
-function readText(path) {
-  return readFileSync(path, "utf8");
-}
-
-function fileDigest(path) {
-  return sha256(readFileSync(path));
-}
-
-function artifactPath(planRoot, artifact) {
-  const value = assertString(artifact, "artifact");
-  return isAbsolute(value) ? resolve(value) : resolve(planRoot, value);
-}
-
-function syncDirectory(path) {
-  let fd;
-  try {
-    fd = openSync(path, "r");
-    fsyncSync(fd);
-  } catch (error) {
-    if (!["EINVAL", "EPERM", "EISDIR"].includes(error.code)) throw error;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-function atomicProject(target, content, transactionId) {
-  const folder = dirname(target);
-  const backupFolder = join(folder, ".delivery-control-backups");
-  mkdirSync(backupFolder, { recursive: true });
-  const temp = join(folder, `.${transactionId}.delivery-control.tmp`);
-  const backup = join(backupFolder, `${basename(target)}.${new Date().toISOString().replaceAll(":", "").replaceAll(".", "")}.${transactionId}.bak`);
-  copyFileSync(target, backup);
-  const fd = openSync(temp, "wx");
-  try {
-    writeFileSync(fd, content, "utf8");
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temp, target);
-  syncDirectory(folder);
-  syncDirectory(backupFolder);
-  const backups = readdirSync(backupFolder)
-    .filter((name) => name.startsWith(`${basename(target)}.`) && name.endsWith(".bak"))
-    .map((name) => ({ name, path: join(backupFolder, name), mtime: statSync(join(backupFolder, name)).mtimeMs }))
-    .sort((a, b) => b.mtime - a.mtime);
-  for (const stale of backups.slice(DEFAULT_BACKUP_RETENTION)) {
-    try { unlinkSync(stale.path); } catch {}
-  }
-  return { backup, temp };
-}
-
-function normalizeState(input) {
-  const state = {
-    flow_id: assertString(input.flow_id, "flow_id"),
-    revision: Number(input.revision),
-    flow: assertString(input.flow, "flow"),
-    status: assertString(input.status, "status"),
-    current_phase: assertString(input.current_phase, "current_phase"),
-    next_phase: assertString(input.next_phase, "next_phase"),
-    plan_target: assertString(input.plan_target, "plan_target"),
-    terminal_condition: assertString(input.terminal_condition, "terminal_condition"),
-    resume_point: assertString(input.resume_point, "resume_point"),
-    route: input.route ?? null,
-    acceptance_criteria: Array.isArray(input.acceptance_criteria) ? input.acceptance_criteria : [],
-    required_evidence_types: Array.isArray(input.required_evidence_types) ? input.required_evidence_types : [],
-    external_actions: Array.isArray(input.external_actions) ? input.external_actions : [],
-    plan_sync: input.plan_sync ?? "pending",
-    native_plan_digest: input.native_plan_digest ?? null,
-    correlation_id: input.correlation_id ?? null,
-    receipt_digest: input.receipt_digest ?? null,
-    terminal_observation: input.terminal_observation ?? null,
-    review_findings: Array.isArray(input.review_findings) ? input.review_findings : [],
-    evidence_records: Array.isArray(input.evidence_records) ? input.evidence_records : [],
-    authorization_receipts: Array.isArray(input.authorization_receipts) ? input.authorization_receipts : [],
-    history: Array.isArray(input.history) ? input.history : []
-  };
-  if (!Number.isInteger(state.revision) || state.revision < 0) throw new Error("revision must be a non-negative integer");
-  if (!FLOW_VALUES.includes(state.flow)) throw new Error(`unknown flow: ${state.flow}`);
-  if (!STATUS_VALUES.includes(state.status)) throw new Error(`unknown status: ${state.status}`);
-  if (!PHASE_VALUES.includes(state.current_phase)) throw new Error(`unknown current_phase: ${state.current_phase}`);
-  if (state.next_phase !== "none" && !PHASE_VALUES.includes(state.next_phase)) throw new Error(`unknown next_phase: ${state.next_phase}`);
-  const ids = new Set();
-  state.acceptance_criteria = state.acceptance_criteria.map((criterion) => {
-    const acceptance_id = assertString(criterion.acceptance_id, "acceptance_id");
-    if (ids.has(acceptance_id)) throw new Error(`duplicate acceptance_id: ${acceptance_id}`);
-    ids.add(acceptance_id);
-    return { acceptance_id, description: assertString(criterion.description, "acceptance description") };
-  });
-  const findingIds = new Set();
-  state.review_findings = state.review_findings.map((finding) => {
-    const finding_id = assertString(finding.finding_id, "finding_id");
-    if (findingIds.has(finding_id)) throw new Error(`duplicate finding_id: ${finding_id}`);
-    findingIds.add(finding_id);
-    const severity = assertString(finding.severity, "finding severity");
-    const disposition = assertString(finding.disposition, "finding disposition");
-    if (!["P0", "P1", "P2", "P3"].includes(severity)) throw new Error(`unknown finding severity: ${severity}`);
-    if (!["open", "fixed", "accepted", "deferred"].includes(disposition)) throw new Error(`unknown finding disposition: ${disposition}`);
-    if (["fixed", "accepted", "deferred"].includes(disposition) && !assertString(finding.reason || finding.reverified_by || "", "finding disposition reason")) throw new Error(`finding ${finding_id} needs a disposition reason`);
-    return { finding_id, severity, disposition, reason: finding.reason || null, reverified_by: finding.reverified_by || null };
-  });
-  const actionIds = new Set();
-  state.external_actions = state.external_actions.map((action) => {
-    const normalized = { action: assertString(action.action, "external action"), target: assertString(action.target, "external target"), environment: assertString(action.environment, "external environment"), request_digest: action.request_digest || null };
-    const key = `${normalized.action}|${normalized.target}|${normalized.environment}|${normalized.request_digest || "legacy"}`;
-    if (actionIds.has(key)) throw new Error(`duplicate external action: ${key}`);
-    actionIds.add(key);
-    if (normalized.request_digest && !/^sha256:[0-9a-f]{64}$/.test(normalized.request_digest)) throw new Error("external action request_digest must be sha256:<64 lowercase hex>");
-    return normalized;
-  });
-  if (state.terminal_observation !== null) {
-    for (const field of ["evidence_id", "artifact", "artifact_digest", "observed_at", "result"]) assertString(state.terminal_observation[field], `terminal observation ${field}`);
-    if (!/^sha256:[0-9a-f]{64}$/.test(state.terminal_observation.artifact_digest)) throw new Error("terminal observation artifact_digest must be sha256:<64 lowercase hex>");
-  }
-  return state;
-}
-
-function stateBlock(state) {
-  return `${STATE_START}\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n${STATE_END}`;
-}
-
-function validateTransition(previous, next, event) {
-  if (!PHASE_TRANSITIONS[previous.current_phase]?.includes(next.current_phase)) throw Object.assign(new Error(`illegal phase transition: ${previous.current_phase} -> ${next.current_phase}`), { code: "illegal_phase_transition" });
-  if (!STATUS_TRANSITIONS[previous.status]?.includes(next.status)) throw Object.assign(new Error(`illegal status transition: ${previous.status} -> ${next.status}`), { code: "illegal_status_transition" });
-  const rule = EVENT_RULES[event];
-  if (rule) for (const [field, allowed] of Object.entries(rule)) if (!allowed.includes(next[field])) throw Object.assign(new Error(`${event} requires ${field} in ${allowed.join(", ")}`), { code: "event_rule_violation" });
-  if (next.status === "complete" && event !== "terminal-verified") throw Object.assign(new Error("complete requires terminal-verified"), { code: "completion_gate_required" });
-  if (next.current_phase === "close" && next.status !== "complete") throw Object.assign(new Error("close phase requires complete status"), { code: "invalid_close_state" });
-  if (!["complete", "failed", "cancelled"].includes(next.status) && next.next_phase === "none") throw Object.assign(new Error("non-terminal state requires a next phase"), { code: "missing_next_phase" });
-  const route = next.route || previous.route;
-  const previousIndex = PHASE_ORDER.indexOf(previous.current_phase);
-  const nextIndex = PHASE_ORDER.indexOf(next.current_phase);
-  const completed = new Set([previous.current_phase, ...(previous.history || []).map((item) => item.new_phase)]);
-  if (nextIndex > previousIndex && route) {
-    const skipped = new Set(route.skipped_phases || []);
-    for (const phase of PHASE_ORDER.slice(previousIndex + 1, nextIndex)) {
-      if (!skipped.has(phase) && !completed.has(phase)) throw Object.assign(new Error(`phase ${phase} must be completed or explicitly skipped before ${next.current_phase}`), { code: "phase_skip_not_declared" });
-    }
-  }
-  const required = REQUIRED_PHASES_BY_FLOW[next.flow] || [];
-  if (next.current_phase === "execute" && required.includes("spec") && !completed.has("spec") && !next.route?.approved_spec) throw Object.assign(new Error("spec must be ready before execute"), { code: "spec_required" });
-  if (next.current_phase === "review" && required.includes("execute") && !completed.has("execute")) throw Object.assign(new Error("execute must be completed before review"), { code: "execute_required" });
-  if (next.current_phase === "close") {
-    const skipped = new Set(next.route?.skipped_phases || previous.route?.skipped_phases || []);
-    for (const phase of required) {
-      const exceptionField = REQUIRED_PHASE_SKIP_EXCEPTIONS[phase];
-      const approvedSpec = exceptionField ? next.route?.[exceptionField] === true : false;
-      if (skipped.has(phase) && !approvedSpec) throw Object.assign(new Error(`required phase cannot be skipped: ${phase}`), { code: "required_phase_skipped" });
-      if (!completed.has(phase) && !approvedSpec) throw Object.assign(new Error(`required phase is incomplete: ${phase}`), { code: "required_phase_incomplete" });
-    }
-  }
-  const previousFindings = new Set((previous.review_findings || []).map((finding) => finding.finding_id));
-  const nextFindings = new Set((next.review_findings || []).map((finding) => finding.finding_id));
-  for (const findingId of previousFindings) if (!nextFindings.has(findingId)) throw Object.assign(new Error(`review finding cannot be removed: ${findingId}`), { code: "review_finding_removed" });
-}
-
-function count(text, token) {
-  return text.split(token).length - 1;
-}
-
-function replaceStateBlock(text, state) {
-  const starts = count(text, STATE_START);
-  const ends = count(text, STATE_END);
-  if (starts > 1 || ends > 1 || starts !== ends) throw new Error("Plan Tree has invalid delivery-control markers");
-  const block = stateBlock(state);
-  if (starts === 0) return `${text.trimEnd()}\n\n${block}\n`;
-  const start = text.indexOf(STATE_START);
-  const end = text.indexOf(STATE_END, start) + STATE_END.length;
-  return `${text.slice(0, start)}${block}${text.slice(end)}`;
-}
-
-export function parseStateBlock(text) {
-  const starts = count(text, STATE_START);
-  const ends = count(text, STATE_END);
-  if (starts !== 1 || ends !== 1) throw new Error("Plan Tree must contain exactly one delivery-control state block");
-  const start = text.indexOf(STATE_START) + STATE_START.length;
-  const end = text.indexOf(STATE_END, start);
-  const raw = text.slice(start, end).trim().replace(/^```json\s*/i, "").replace(/\s*```$/, "");
-  return normalizeState(JSON.parse(raw));
-}
-
-function parseLegacyBlock(text, target) {
-  const starts = count(text, LEGACY_START);
-  const ends = count(text, LEGACY_END);
-  if (starts !== 1 || ends !== 1) return null;
-  const body = text.slice(text.indexOf(LEGACY_START) + LEGACY_START.length, text.indexOf(LEGACY_END)).trim();
-  const pairs = Object.fromEntries(body.split(/\r?\n/).map((line) => {
-    const index = line.indexOf(":");
-    return index < 0 ? [line, ""] : [line.slice(0, index).trim(), line.slice(index + 1).trim()];
-  }));
-  return normalizeState({
-    flow_id: pairs.run_id || randomUUID(), revision: 0, flow: pairs.flow || "main",
-    status: pairs.status || "active", current_phase: pairs.current_phase || "route",
-    next_phase: pairs.next_phase || "none", plan_target: target,
-    terminal_condition: pairs.terminal_condition || "Legacy terminal condition requires revalidation",
-    resume_point: pairs.resume_point || "Review imported legacy state",
-    acceptance_criteria: [], required_evidence_types: [], plan_sync: "unavailable"
-  });
-}
-
-function publicFlow(row) {
-  if (!row) return null;
-  return {
-    flow_id: row.flow_id, revision: row.revision, plan_root: row.plan_root, plan_target: row.plan_target,
-    flow: row.flow, status: row.status, current_phase: row.current_phase, next_phase: row.next_phase,
-    terminal_condition: row.terminal_condition, resume_point: row.resume_point,
-    plan_tree_digest: row.plan_tree_digest, native_plan_digest: row.native_plan_digest,
-    plan_sync: row.plan_sync, frozen: Boolean(row.frozen), drift_report: row.drift_report ? JSON.parse(row.drift_report) : null,
-    route: row.route_json ? JSON.parse(row.route_json) : null,
-    acceptance_criteria: JSON.parse(row.acceptance_json || "[]"),
-    required_evidence_types: JSON.parse(row.required_types_json || "[]"),
-    external_actions: JSON.parse(row.external_actions_json || "[]"),
-    ...JSON.parse(row.gate_json || '{"review_findings":[],"terminal_observation":null}'),
-    evidence_records: JSON.parse(row.evidence_json || "[]"),
-    authorization_receipts: JSON.parse(row.authorization_receipts_json || "[]"),
-    history: JSON.parse(row.history_json || "[]"),
-    correlation_id: row.correlation_id, receipt_digest: row.receipt_digest,
-    created_at: row.created_at, updated_at: row.updated_at
-  };
-}
-
-function gateJson(state) {
-  return JSON.stringify({ review_findings: state.review_findings || [], terminal_observation: state.terminal_observation || null });
-}
+import { assertString, canonical, fail, nowIso, ok, requestDigest, sha256 } from "./lib/primitives.mjs";
+import { artifactPath, atomicProject, contained, fileDigest, readText } from "./lib/plan-tree-files.mjs";
+import { nextInRoute, routeSequence, skippedPhases } from "./lib/route-policy.mjs";
+import { migrateDatabase } from "./lib/database-schema.mjs";
+import { gateJson, normalizeState, parseLegacyBlock, parseStateBlock, publicFlow, replaceStateBlock, validateTransition } from "./lib/state-model.mjs";
+export { sha256 } from "./lib/primitives.mjs";
+export { parseStateBlock } from "./lib/state-model.mjs";
 
 export class DeliveryControl {
   constructor(options = {}) {
@@ -275,70 +28,7 @@ export class DeliveryControl {
   close() { this.db.close(); }
 
   migrate() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
-      INSERT INTO schema_meta(version) SELECT ${SCHEMA_VERSION} WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
-      CREATE TABLE IF NOT EXISTS flows (
-        flow_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, plan_root TEXT NOT NULL, plan_target TEXT NOT NULL,
-        flow TEXT NOT NULL, status TEXT NOT NULL, current_phase TEXT NOT NULL, next_phase TEXT NOT NULL,
-        terminal_condition TEXT NOT NULL, resume_point TEXT NOT NULL, plan_tree_digest TEXT NOT NULL,
-        native_plan_digest TEXT, plan_sync TEXT NOT NULL DEFAULT 'pending', frozen INTEGER NOT NULL DEFAULT 0,
-        drift_report TEXT, route_json TEXT, acceptance_json TEXT NOT NULL DEFAULT '[]', required_types_json TEXT NOT NULL DEFAULT '[]',
-        external_actions_json TEXT NOT NULL DEFAULT '[]', gate_json TEXT NOT NULL DEFAULT '{"review_findings":[],"terminal_observation":null}', correlation_id TEXT, receipt_digest TEXT,
-        evidence_json TEXT NOT NULL DEFAULT '[]', authorization_receipts_json TEXT NOT NULL DEFAULT '[]', history_json TEXT NOT NULL DEFAULT '[]',
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS events (
-        event_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, revision INTEGER NOT NULL, event TEXT NOT NULL,
-        request_digest TEXT NOT NULL, previous_state TEXT, new_state TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS pending_transactions (
-        transaction_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, target_revision INTEGER NOT NULL,
-        stage TEXT NOT NULL, old_digest TEXT NOT NULL, new_digest TEXT NOT NULL, old_state TEXT NOT NULL, new_state TEXT NOT NULL,
-        request_digest TEXT NOT NULL, reason TEXT NOT NULL, backup_path TEXT, temp_path TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS leases (
-        flow_id TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS evidence (
-        evidence_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, acceptance_ids TEXT NOT NULL, type TEXT NOT NULL, result TEXT NOT NULL,
-        artifact TEXT NOT NULL, artifact_digest TEXT NOT NULL, command_or_request_id TEXT NOT NULL, observed_at TEXT NOT NULL,
-        producer TEXT NOT NULL, environment TEXT NOT NULL, supersedes TEXT, expires_at TEXT, legacy_unverified INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS authorizations (
-        authorization_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, environment TEXT NOT NULL,
-        request_digest TEXT NOT NULL, control_request_digest TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, nonce TEXT NOT NULL UNIQUE, challenge_digest TEXT NOT NULL,
-        confirmed_by TEXT, confirmed_at TEXT, confirmed_request_digest TEXT, consumed_at TEXT, consumed_request_digest TEXT, created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS native_plan_sync (
-        projection_id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, flow_revision INTEGER NOT NULL, projection_revision INTEGER NOT NULL,
-        plan_json TEXT NOT NULL, digest TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, confirmed_at TEXT
-      );
-      CREATE TABLE IF NOT EXISTS metric_aggregates (
-        metric TEXT NOT NULL, dimension TEXT NOT NULL, value INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(metric, dimension)
-      );
-      CREATE INDEX IF NOT EXISTS idx_events_flow ON events(flow_id, revision);
-      CREATE INDEX IF NOT EXISTS idx_pending_flow ON pending_transactions(flow_id, stage);
-      CREATE INDEX IF NOT EXISTS idx_evidence_flow ON evidence(flow_id);
-      CREATE INDEX IF NOT EXISTS idx_auth_flow ON authorizations(flow_id);
-    `);
-    const columns = new Set(this.db.prepare("PRAGMA table_info(flows)").all().map((column) => column.name));
-    for (const [name, definition] of [["evidence_json", "TEXT NOT NULL DEFAULT '[]'"], ["authorization_receipts_json", "TEXT NOT NULL DEFAULT '[]'"], ["history_json", "TEXT NOT NULL DEFAULT '[]'"], ["gate_json", `TEXT NOT NULL DEFAULT '{"review_findings":[],"terminal_observation":null}'`]]) {
-      if (!columns.has(name)) this.db.exec(`ALTER TABLE flows ADD COLUMN ${name} ${definition}`);
-    }
-    const version = this.db.prepare("SELECT version FROM schema_meta").get().version;
-    if (version > SCHEMA_VERSION) throw new Error(`Unsupported database schema: ${version}`);
-    if (version < 2) {
-      const authColumns = new Set(this.db.prepare("PRAGMA table_info(authorizations)").all().map((column) => column.name));
-      for (const [name, definition] of [
-        ["control_request_digest", "TEXT NOT NULL DEFAULT ''"],
-        ["confirmed_request_digest", "TEXT"],
-        ["consumed_request_digest", "TEXT"]
-      ]) if (!authColumns.has(name)) this.db.exec(`ALTER TABLE authorizations ADD COLUMN ${name} ${definition}`);
-      this.db.prepare("UPDATE schema_meta SET version=?").run(2);
-    }
-    const migratedVersion = this.db.prepare("SELECT version FROM schema_meta").get().version;
-    if (migratedVersion !== SCHEMA_VERSION) throw new Error(`Unsupported database schema: ${migratedVersion}`);
+    migrateDatabase(this.db);
   }
 
   transaction(fn) {
@@ -386,6 +76,7 @@ export class DeliveryControl {
         flow_id: flowId, revision: 0, flow: input.flow || "main", status: "active", current_phase: "route",
         next_phase: "clarify", plan_target: targetPath,
         terminal_condition: input.terminal_condition, resume_point: input.resume_point,
+        delivery_generation: 1, scope_digest: input.scope_digest,
         acceptance_criteria: input.acceptance_criteria || [], required_evidence_types: input.required_evidence_types || [],
         external_actions: input.external_actions || [], correlation_id: input.correlation_id || null, plan_sync: "pending"
       });
@@ -397,12 +88,14 @@ export class DeliveryControl {
       this.transaction(() => {
         this.db.prepare(`INSERT INTO flows(flow_id,revision,plan_root,plan_target,flow,status,current_phase,next_phase,terminal_condition,resume_point,
         plan_tree_digest,native_plan_digest,plan_sync,frozen,drift_report,route_json,acceptance_json,required_types_json,external_actions_json,gate_json,
-          correlation_id,receipt_digest,evidence_json,authorization_receipts_json,history_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          delivery_generation,scope_digest,fixed_point_json,external_action_results_json,correlation_id,receipt_digest,evidence_json,authorization_receipts_json,history_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
           flowId, state.revision, rootPath, targetPath, state.flow, state.status, state.current_phase, state.next_phase,
           state.terminal_condition, state.resume_point, digest, state.native_plan_digest, state.plan_sync, 0, null, state.route ? JSON.stringify(state.route) : null,
           JSON.stringify(state.acceptance_criteria), JSON.stringify(state.required_evidence_types), JSON.stringify(state.external_actions), gateJson(state),
+          state.delivery_generation, state.scope_digest, JSON.stringify(state.fixed_point), JSON.stringify(state.external_action_results),
           state.correlation_id, state.receipt_digest, JSON.stringify(state.evidence_records), JSON.stringify(state.authorization_receipts), JSON.stringify(state.history), at, at);
         this.db.prepare("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)").run(randomUUID(), flowId, state.revision, "initialized", input.request_digest, null, JSON.stringify(state), "flow initialized", at);
+        this.syncActionResultCache(state.flow_id, state.external_action_results);
         this.metric("flow", "initialized");
       });
       return ok({ flow: publicFlow(this.row(flowId)), imported_legacy: Boolean(imported) });
@@ -426,6 +119,46 @@ export class DeliveryControl {
     if (!committed.ok) return committed;
     const projection = this.projectNativePlan({ flow_id: input.flow_id, expected_revision: committed.flow.revision, request_digest: requestDigest("project_native_plan", { ...input, expected_revision: committed.flow.revision }, ["flow_id", "expected_revision"]) });
     return ok({ flow: projection.ok ? projection.flow || committed.flow : committed.flow, native_plan_projection: projection.ok ? projection : { ok: false, error: projection.error } });
+  }
+
+  completePhase(input) {
+    const row = this.row(input.flow_id);
+    if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
+    if (row.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: row.revision });
+    if (input.outcome !== "completed") return fail("phase_not_completed", "only a completed phase can advance the fixed point");
+    if (!["spec", "execute", "review"].includes(input.phase)) return fail("phase_has_no_fixed_point", `phase does not own a fixed point: ${input.phase}`);
+    if (row.current_phase !== input.phase) return fail("phase_mismatch", `current phase is ${row.current_phase}, not ${input.phase}`);
+    if (!/^sha256:[0-9a-f]{64}$/.test(input.artifact_digest || "")) return fail("invalid_artifact_digest", "artifact_digest must be sha256:<64 lowercase hex>");
+    const state = publicFlow(row);
+    const field = input.phase === "spec" ? "spec_digest" : input.phase === "execute" ? "implementation_digest" : "review_digest";
+    const fixedPoint = { ...state.fixed_point, generation: state.delivery_generation, [field]: input.artifact_digest };
+    if (field === "spec_digest") {
+      fixedPoint.implementation_digest = null;
+      fixedPoint.review_digest = null;
+    } else if (field === "implementation_digest") fixedPoint.review_digest = null;
+    return this.commitTransition({
+      flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest,
+      event: "phase-completed", reason: input.reason || `complete ${input.phase} fixed point`, patch: { fixed_point: fixedPoint }
+    });
+  }
+
+  reviseScope(input) {
+    const row = this.row(input.flow_id);
+    if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
+    if (row.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: row.revision });
+    if (!/^sha256:[0-9a-f]{64}$/.test(input.scope_digest || "")) return fail("invalid_scope_digest", "scope_digest must be sha256:<64 lowercase hex>");
+    if (input.scope_digest === row.scope_digest) return fail("scope_unchanged", "scope_digest is unchanged");
+    const generation = row.delivery_generation + 1;
+    return this.commitTransition({
+      flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest,
+      event: "scope-change", reason: assertString(input.reason, "reason"), patch: {
+        delivery_generation: generation, scope_digest: input.scope_digest,
+        fixed_point: { generation, spec_digest: null, implementation_digest: null, review_digest: null },
+        status: "active", current_phase: "route", next_phase: "clarify", route: null,
+        plan_sync: "pending", native_plan_digest: null,
+        resume_point: `Delivery generation ${generation} requires routing and fresh fixed-point evidence`
+      }
+    });
   }
 
   recordDeliveryEvidence(input) {
@@ -452,22 +185,60 @@ export class DeliveryControl {
   selectRoute(input) {
     const row = this.row(input.flow_id);
     if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
-    const skipped = [...new Set(input.skipped_phases || [])];
-    for (const phase of skipped) if (!PHASE_ORDER.includes(phase) || phase === "route" || phase === "close") return fail("invalid_skipped_phase", `cannot skip phase: ${phase}`);
-    if (input.setup_required !== true && !skipped.includes("setup")) skipped.unshift("setup");
-    const required = REQUIRED_PHASES_BY_FLOW[row.flow] || [];
-    const invalidRequiredSkips = required.filter((phase) => skipped.includes(phase) && !(REQUIRED_PHASE_SKIP_EXCEPTIONS[phase] && input.approved_spec === true));
-    if (invalidRequiredSkips.length) return fail("required_phase_skipped", `required phases cannot be skipped: ${invalidRequiredSkips.join(", ")}`, { phases: invalidRequiredSkips });
+    if (Object.prototype.hasOwnProperty.call(input, "skipped_phases") || Object.prototype.hasOwnProperty.call(input, "next_phase")) return fail("caller_phase_arithmetic_forbidden", "route phases and next_phase are derived by the controller");
+    if (input.approved_spec === true && !/^sha256:[0-9a-f]{64}$/.test(input.approved_spec_digest || "")) return fail("approved_spec_digest_required", "approved_spec requires approved_spec_digest");
+    const phaseSequence = routeSequence(row.flow, { setupRequired: input.setup_required === true, approvedSpec: input.approved_spec === true });
+    const skipped = skippedPhases(phaseSequence);
     const route = {
       chosen_procedure: assertString(input.chosen_procedure, "chosen_procedure"),
       why: assertString(input.why, "why"), skipped_phases: skipped,
-      confidence: input.confidence || "high", approved_spec: input.approved_spec === true, selected_at: nowIso(this.clock)
+      phase_sequence: phaseSequence, template: row.flow, setup_required: input.setup_required === true,
+      confidence: input.confidence || "high", approved_spec: input.approved_spec === true,
+      approved_spec_digest: input.approved_spec_digest || null, selected_at: nowIso(this.clock)
     };
-    const nextPhase = PHASE_ORDER.slice(1).find((phase) => !skipped.includes(phase)) || "close";
+    const nextPhase = phaseSequence[1] || "close";
     const awaiting = route.confidence === "low" && input.confirmed !== true;
-    const patch = { route, status: awaiting ? "awaiting-user" : "active", next_phase: awaiting ? "route" : nextPhase };
+    const state = publicFlow(row);
+    const patch = { route, status: awaiting ? "awaiting-user" : "active", next_phase: awaiting ? "route" : nextPhase, plan_sync: "pending", native_plan_digest: null };
+    if (input.approved_spec === true) patch.fixed_point = { ...state.fixed_point, spec_digest: input.approved_spec_digest, implementation_digest: null, review_digest: null };
     if (awaiting) patch.resume_point = "Route confidence is low; user must confirm the selected route";
     return this.commitTransition({ ...input, event: "route-selected", reason: input.reason || route.why, patch });
+  }
+
+  advancePhase(input) {
+    const row = this.row(input.flow_id);
+    if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
+    if (row.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: row.revision });
+    if (row.current_phase !== input.phase) return fail("phase_mismatch", `current phase is ${row.current_phase}, not ${input.phase}`);
+    const state = publicFlow(row);
+    if (!state.route?.phase_sequence) return fail("route_required", "select a route template before advancing phases");
+    const outcome = input.outcome || "completed";
+    if (outcome === "failed") return this.commitTransition({ ...input, event: "unrecoverable-failure", reason: input.reason || `${input.phase} failed`, patch: { status: "failed", next_phase: "none", plan_sync: "pending", native_plan_digest: null, resume_point: input.resume_point || `${input.phase} failed; inspect evidence before retry` } });
+    if (["awaiting-user", "blocked-external", "partial"].includes(outcome)) {
+      const status = outcome;
+      const event = outcome === "awaiting-user" ? "user-decision-needed" : outcome === "blocked-external" ? "external-blocker" : "partial-result";
+      return this.commitTransition({ ...input, event, reason: input.reason || `${input.phase} is ${outcome}`, patch: { status, next_phase: input.phase, plan_sync: "pending", native_plan_digest: null, resume_point: input.resume_point || `${input.phase} awaits resolution` } });
+    }
+    if (outcome !== "completed") return fail("invalid_phase_outcome", `unknown phase outcome: ${outcome}`);
+    if (!["confirmed", "unavailable"].includes(state.plan_sync)) return fail("native_plan_sync_required", "confirm the current host-plan projection or record an unavailable handoff before completing a phase", { plan_sync: state.plan_sync });
+    const nextPhase = nextInRoute(state.route, input.phase);
+    if (!nextPhase || nextPhase === "none") return fail("close_flow_required", "use close_flow to complete the final route phase");
+    const patch = nextPhase === "close"
+      ? { status: "active", current_phase: input.phase, next_phase: "close", resume_point: input.resume_point || "Review fixed point recorded; verify close gates" }
+      : { status: "active", current_phase: nextPhase, next_phase: nextInRoute(state.route, nextPhase) || "none", resume_point: input.resume_point || `Continue ${nextPhase}` };
+    patch.plan_sync = "pending";
+    patch.native_plan_digest = null;
+    if (["spec", "execute", "review"].includes(input.phase)) {
+      if (!/^sha256:[0-9a-f]{64}$/.test(input.artifact_digest || "")) return fail("fixed_point_digest_required", `${input.phase} completion requires artifact_digest`);
+      const field = input.phase === "spec" ? "spec_digest" : input.phase === "execute" ? "implementation_digest" : "review_digest";
+      patch.fixed_point = { ...state.fixed_point, [field]: input.artifact_digest };
+      if (field === "spec_digest") { patch.fixed_point.implementation_digest = null; patch.fixed_point.review_digest = null; }
+      if (field === "implementation_digest") patch.fixed_point.review_digest = null;
+    }
+    const committed = this.commitTransition({ ...input, event: "phase-completed", reason: input.reason || `complete ${input.phase}`, patch });
+    if (!committed.ok) return committed;
+    const projection = this.projectNativePlan({ flow_id: row.flow_id, expected_revision: committed.flow.revision, request_digest: requestDigest("project_native_plan", { flow_id: row.flow_id, expected_revision: committed.flow.revision }, ["flow_id", "expected_revision"]) });
+    return ok({ flow: committed.flow, native_plan_projection: projection });
   }
 
   proposeTransition(input) {
@@ -527,11 +298,12 @@ export class DeliveryControl {
         const state = normalizeState(proposal.state);
         this.db.prepare(`UPDATE pending_transactions SET stage='projected',backup_path=?,temp_path=?,updated_at=? WHERE transaction_id=?`).run(paths.backup, paths.temp, nowIso(this.clock), txId);
         this.db.prepare(`UPDATE flows SET revision=?,flow=?,status=?,current_phase=?,next_phase=?,terminal_condition=?,resume_point=?,plan_tree_digest=?,
-          native_plan_digest=?,plan_sync=?,route_json=?,acceptance_json=?,required_types_json=?,external_actions_json=?,gate_json=?,correlation_id=?,receipt_digest=?,evidence_json=?,authorization_receipts_json=?,history_json=?,updated_at=? WHERE flow_id=?`).run(
+          native_plan_digest=?,plan_sync=?,route_json=?,acceptance_json=?,required_types_json=?,external_actions_json=?,gate_json=?,delivery_generation=?,scope_digest=?,fixed_point_json=?,external_action_results_json=?,correlation_id=?,receipt_digest=?,evidence_json=?,authorization_receipts_json=?,history_json=?,updated_at=? WHERE flow_id=?`).run(
           state.revision, state.flow, state.status, state.current_phase, state.next_phase, state.terminal_condition, state.resume_point,
           digest, state.native_plan_digest, state.plan_sync, state.route ? JSON.stringify(state.route) : null, JSON.stringify(state.acceptance_criteria),
-          JSON.stringify(state.required_evidence_types), JSON.stringify(state.external_actions), gateJson(state), state.correlation_id, state.receipt_digest,
+          JSON.stringify(state.required_evidence_types), JSON.stringify(state.external_actions), gateJson(state), state.delivery_generation, state.scope_digest, JSON.stringify(state.fixed_point), JSON.stringify(state.external_action_results), state.correlation_id, state.receipt_digest,
           JSON.stringify(state.evidence_records), JSON.stringify(state.authorization_receipts), JSON.stringify(state.history), nowIso(this.clock), row.flow_id);
+        this.syncActionResultCache(state.flow_id, state.external_action_results);
         this.db.prepare("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)").run(randomUUID(), row.flow_id, state.revision, proposal.event || "advance", proposal.request_digest, JSON.stringify(publicFlow(row)), JSON.stringify(state), proposal.reason, nowIso(this.clock));
         this.db.prepare("UPDATE pending_transactions SET stage='committed',updated_at=? WHERE transaction_id=?").run(nowIso(this.clock), txId);
         this.db.prepare("DELETE FROM leases WHERE flow_id=? AND owner=?").run(row.flow_id, owner);
@@ -566,12 +338,13 @@ export class DeliveryControl {
         const at = nowIso(this.clock);
         this.transaction(() => this.db.prepare(`INSERT INTO flows(flow_id,revision,plan_root,plan_target,flow,status,current_phase,next_phase,terminal_condition,resume_point,
           plan_tree_digest,native_plan_digest,plan_sync,frozen,drift_report,route_json,acceptance_json,required_types_json,external_actions_json,gate_json,
-          correlation_id,receipt_digest,evidence_json,authorization_receipts_json,history_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          delivery_generation,scope_digest,fixed_point_json,external_action_results_json,correlation_id,receipt_digest,evidence_json,authorization_receipts_json,history_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
           state.flow_id, state.revision, rootPath, targetPath, state.flow, state.status, state.current_phase, state.next_phase,
           state.terminal_condition, state.resume_point, fileDigest(targetPath), state.native_plan_digest, state.plan_sync, 0, null,
           state.route ? JSON.stringify(state.route) : null, JSON.stringify(state.acceptance_criteria), JSON.stringify(state.required_evidence_types),
-          JSON.stringify(state.external_actions), gateJson(state), state.correlation_id, state.receipt_digest, JSON.stringify(state.evidence_records), JSON.stringify(state.authorization_receipts), JSON.stringify(state.history), at, at));
+          JSON.stringify(state.external_actions), gateJson(state), state.delivery_generation, state.scope_digest, JSON.stringify(state.fixed_point), JSON.stringify(state.external_action_results), state.correlation_id, state.receipt_digest, JSON.stringify(state.evidence_records), JSON.stringify(state.authorization_receipts), JSON.stringify(state.history), at, at));
         this.syncEvidenceCache(state.flow_id, state.evidence_records);
+        this.syncActionResultCache(state.flow_id, state.external_action_results);
         this.rebuildMetricsCache(state.history);
         row = this.row(input.flow_id);
         return ok({ action: "rebuilt-from-plan-tree", flow: publicFlow(row) });
@@ -589,11 +362,12 @@ export class DeliveryControl {
           const state = normalizeState(JSON.parse(tx.new_state));
           this.transaction(() => {
             this.db.prepare(`UPDATE flows SET revision=?,flow=?,status=?,current_phase=?,next_phase=?,terminal_condition=?,resume_point=?,plan_tree_digest=?,
-              native_plan_digest=?,plan_sync=?,route_json=?,acceptance_json=?,required_types_json=?,external_actions_json=?,gate_json=?,correlation_id=?,receipt_digest=?,evidence_json=?,authorization_receipts_json=?,history_json=?,updated_at=? WHERE flow_id=?`).run(
+              native_plan_digest=?,plan_sync=?,route_json=?,acceptance_json=?,required_types_json=?,external_actions_json=?,gate_json=?,delivery_generation=?,scope_digest=?,fixed_point_json=?,external_action_results_json=?,correlation_id=?,receipt_digest=?,evidence_json=?,authorization_receipts_json=?,history_json=?,updated_at=? WHERE flow_id=?`).run(
               state.revision, state.flow, state.status, state.current_phase, state.next_phase, state.terminal_condition, state.resume_point,
               actual, state.native_plan_digest, state.plan_sync, state.route ? JSON.stringify(state.route) : null, JSON.stringify(state.acceptance_criteria), JSON.stringify(state.required_evidence_types),
-              JSON.stringify(state.external_actions), gateJson(state), state.correlation_id, state.receipt_digest, JSON.stringify(state.evidence_records), JSON.stringify(state.authorization_receipts), JSON.stringify(state.history), nowIso(this.clock), row.flow_id);
+              JSON.stringify(state.external_actions), gateJson(state), state.delivery_generation, state.scope_digest, JSON.stringify(state.fixed_point), JSON.stringify(state.external_action_results), state.correlation_id, state.receipt_digest, JSON.stringify(state.evidence_records), JSON.stringify(state.authorization_receipts), JSON.stringify(state.history), nowIso(this.clock), row.flow_id);
             this.syncEvidenceCache(state.flow_id, state.evidence_records);
+            this.syncActionResultCache(state.flow_id, state.external_action_results);
             this.db.prepare("UPDATE pending_transactions SET stage='committed',updated_at=? WHERE transaction_id=?").run(nowIso(this.clock), tx.transaction_id);
             this.db.prepare("DELETE FROM leases WHERE flow_id=?").run(row.flow_id);
           });
@@ -662,9 +436,9 @@ export class DeliveryControl {
     if (!/^sha256:[0-9a-f]{64}$/.test(input.request_digest || "")) return fail("invalid_request_digest", "request_digest must be sha256:<64 lowercase hex>");
     if (row.frozen) return fail("flow_frozen", "flow is frozen");
     const route = row.route_json ? JSON.parse(row.route_json) : null;
-    const skipped = new Set(route?.skipped_phases || []);
-    const start = PHASE_ORDER.indexOf(row.current_phase);
-    const phases = PHASE_ORDER.slice(Math.max(start, 0)).filter((phase) => phase === row.current_phase || phase === row.next_phase || !skipped.has(phase));
+    const sequence = route?.phase_sequence || PHASE_ORDER;
+    const start = sequence.indexOf(row.current_phase);
+    const phases = sequence.slice(Math.max(start, 0));
     const steps = [...new Set(phases)].map((phase) => ({ step: PHASE_LABELS[phase], status: phase === row.current_phase ? (row.status === "complete" ? "completed" : "in_progress") : "pending" }));
     const projectionRevision = (this.db.prepare("SELECT COALESCE(MAX(projection_revision),0) AS value FROM native_plan_sync WHERE flow_id=?").get(row.flow_id).value) + 1;
     const plan = { flow_id: row.flow_id, flow_revision: row.revision, projection_revision: projectionRevision, steps };
@@ -676,14 +450,14 @@ export class DeliveryControl {
 
   confirmNativePlan(input) {
     const projection = this.db.prepare("SELECT * FROM native_plan_sync WHERE projection_id=? AND flow_id=?").get(input.projection_id, input.flow_id);
-    if (!projection) return fail("projection_not_found", "native Plan projection was not found");
+    if (!projection) return fail("projection_not_found", "host-plan projection was not found");
     const row = this.row(input.flow_id);
     if (row.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: row.revision });
     if (!/^sha256:[0-9a-f]{64}$/.test(input.request_digest || "")) return fail("invalid_request_digest", "request_digest must be sha256:<64 lowercase hex>");
-    if (row.revision !== projection.flow_revision || input.projection_revision !== projection.projection_revision) return fail("stale_projection", "native Plan projection is stale");
+    if (row.revision !== projection.flow_revision || input.projection_revision !== projection.projection_revision) return fail("stale_projection", "host-plan projection is stale");
     const actualDigest = sha256(canonical({ flow_id: row.flow_id, flow_revision: row.revision, projection_revision: projection.projection_revision, steps: input.applied_steps }));
-    if (actualDigest !== projection.digest) return fail("native_plan_mismatch", "applied native Plan does not match projection", { expected_digest: projection.digest, actual_digest: actualDigest });
-    const committed = this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest, event: "native-plan-confirmed", reason: `confirm native Plan projection ${projection.projection_revision}`, patch: { plan_sync: "confirmed", native_plan_digest: actualDigest } });
+    if (actualDigest !== projection.digest) return fail("native_plan_mismatch", "applied host plan does not match projection", { expected_digest: projection.digest, actual_digest: actualDigest });
+    const committed = this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest, event: "native-plan-confirmed", reason: `confirm host-plan projection ${projection.projection_revision}`, patch: { plan_sync: "confirmed", native_plan_digest: actualDigest } });
     if (!committed.ok) return committed;
     this.transaction(() => {
       this.db.prepare("UPDATE native_plan_sync SET status='confirmed',confirmed_at=? WHERE projection_id=?").run(nowIso(this.clock), projection.projection_id);
@@ -696,7 +470,7 @@ export class DeliveryControl {
     if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
     if (row.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: row.revision });
     if (!/^sha256:[0-9a-f]{64}$/.test(input.request_digest || "")) return fail("invalid_request_digest", "request_digest must be sha256:<64 lowercase hex>");
-    return this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest, event: "native-plan-unavailable", reason: "Codex update_plan unavailable; persist handoff", patch: { plan_sync: "unavailable", resume_point: input.handoff || row.resume_point } });
+    return this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest, event: "native-plan-unavailable", reason: "host plan unavailable; persist handoff", patch: { plan_sync: "unavailable", resume_point: input.handoff || row.resume_point } });
   }
 
   addEvidence(input) {
@@ -714,7 +488,19 @@ export class DeliveryControl {
       if (Number.isNaN(Date.parse(evidence.observed_at))) throw new Error("observed_at must be ISO-8601");
       const existing = JSON.parse(row.evidence_json || "[]");
       if (existing.some((item) => item.evidence_id === evidence.evidence_id)) return fail("evidence_exists", `evidence already exists: ${evidence.evidence_id}`);
-      const record = { ...evidence, artifact: artifactPath(row.plan_root, evidence.artifact), acceptance_ids: [...new Set(evidence.acceptance_ids)], supersedes: evidence.supersedes || null, expires_at: evidence.expires_at || null, legacy_unverified: false };
+      const fixedPoint = JSON.parse(row.fixed_point_json);
+      const record = {
+        ...evidence,
+        artifact: artifactPath(row.plan_root, evidence.artifact),
+        acceptance_ids: [...new Set(evidence.acceptance_ids)],
+        supersedes: evidence.supersedes || null,
+        expires_at: evidence.expires_at || null,
+        legacy_unverified: false,
+        delivery_generation: Number(evidence.delivery_generation ?? row.delivery_generation),
+        subject_digest: evidence.subject_digest ?? fixedPoint.implementation_digest ?? fixedPoint.spec_digest ?? row.scope_digest
+      };
+      if (!Number.isInteger(record.delivery_generation) || record.delivery_generation < 1) throw new Error("delivery_generation must be a positive integer");
+      if (!/^sha256:[0-9a-f]{64}$/.test(record.subject_digest || "")) throw new Error("subject_digest must be sha256:<64 lowercase hex>");
       const committed = this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest, event: "evidence-recorded", reason: `record evidence ${record.evidence_id}`, patch: { evidence_records: [...existing, record] } });
       if (!committed.ok) return committed;
       this.syncEvidenceCache(row.flow_id, committed.flow.evidence_records);
@@ -729,12 +515,16 @@ export class DeliveryControl {
     const requiredTypes = JSON.parse(row.required_types_json || "[]");
     const records = JSON.parse(row.evidence_json || "[]");
     const superseded = new Set(records.map((item) => item.supersedes).filter(Boolean));
+    const fixedPoint = JSON.parse(row.fixed_point_json);
+    const activeSubjects = new Set([row.scope_digest, fixedPoint.spec_digest, fixedPoint.implementation_digest, fixedPoint.review_digest].filter(Boolean));
     const valid = [];
     const invalid = [];
     const ignored = [];
     for (const item of records) {
       let reason = null;
       if (superseded.has(item.evidence_id)) { ignored.push({ ...item, reason: "superseded" }); continue; }
+      if (item.delivery_generation !== row.delivery_generation) { ignored.push({ ...item, reason: "stale-generation" }); continue; }
+      if (!activeSubjects.has(item.subject_digest)) { ignored.push({ ...item, reason: "stale-fixed-point" }); continue; }
       if (item.legacy_unverified) reason = "legacy-unverified";
       else if (item.expires_at && Date.parse(item.expires_at) <= this.clock()) reason = "expired";
       else if (!EVIDENCE_RESULTS.includes(item.result)) reason = "failed-result";
@@ -752,8 +542,17 @@ export class DeliveryControl {
 
   syncEvidenceCache(flowId, records) {
     this.db.prepare("DELETE FROM evidence WHERE flow_id=?").run(flowId);
-    const insert = this.db.prepare("INSERT INTO evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
-    for (const evidence of records) insert.run(evidence.evidence_id, flowId, JSON.stringify(evidence.acceptance_ids), evidence.type, evidence.result, evidence.artifact, evidence.artifact_digest, evidence.command_or_request_id, evidence.observed_at, evidence.producer, evidence.environment, evidence.supersedes || null, evidence.expires_at || null, evidence.legacy_unverified ? 1 : 0);
+    const insert = this.db.prepare(`INSERT INTO evidence(evidence_id,flow_id,acceptance_ids,type,result,artifact,artifact_digest,command_or_request_id,
+      observed_at,producer,environment,supersedes,expires_at,legacy_unverified,delivery_generation,subject_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    for (const evidence of records) insert.run(evidence.evidence_id, flowId, JSON.stringify(evidence.acceptance_ids), evidence.type, evidence.result, evidence.artifact, evidence.artifact_digest, evidence.command_or_request_id, evidence.observed_at, evidence.producer, evidence.environment, evidence.supersedes || null, evidence.expires_at || null, evidence.legacy_unverified ? 1 : 0, evidence.delivery_generation ?? 1, evidence.subject_digest || null);
+  }
+
+  syncActionResultCache(flowId, records) {
+    this.db.prepare("DELETE FROM external_action_results WHERE flow_id=?").run(flowId);
+    const insert = this.db.prepare(`INSERT INTO external_action_results(action_result_id,flow_id,authorization_id,action,target,environment,
+      action_request_digest,outcome,observed_at,producer,result_digest,supersedes,delivery_generation,artifact,artifact_digest,command_or_request_id,legacy_unverified)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    for (const result of records || []) insert.run(result.action_result_id, flowId, result.authorization_id, result.action, result.target, result.environment, result.action_request_digest, result.outcome, result.observed_at, result.producer, result.result_digest, result.supersedes || null, result.delivery_generation, result.artifact || null, result.artifact_digest || null, result.command_or_request_id || null, result.legacy_unverified ? 1 : 0);
   }
 
   rebuildMetricsCache(history) {
@@ -776,10 +575,10 @@ export class DeliveryControl {
       const controlDigest = input.control_request_digest || requestDigest("request_authorization", input, ["flow_id", "expected_revision", "action", "target", "environment", "request_digest", "ttl_ms"]);
       this.transaction(() => this.db.prepare(`INSERT INTO authorizations
         (authorization_id,flow_id,action,target,environment,request_digest,control_request_digest,expires_at,nonce,challenge_digest,
-         confirmed_by,confirmed_at,confirmed_request_digest,consumed_at,consumed_request_digest,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+         confirmed_by,confirmed_at,confirmed_request_digest,consumed_at,consumed_request_digest,created_at,delivery_generation)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
         authorizationId, row.flow_id, input.action, input.target, input.environment, input.request_digest, controlDigest, expiresAt,
-        nonce, sha256(challenge), null, null, null, null, null, nowIso(this.clock)));
+        nonce, sha256(challenge), null, null, null, null, null, nowIso(this.clock), row.delivery_generation));
       return ok({ authorization_id: authorizationId, expires_at: expiresAt, control_request_digest: controlDigest, confirmation: { mode: input.elicitation_supported ? "elicitation" : "challenge", challenge_code: challenge, prompt: `Authorize ${input.action} on ${input.target} in ${input.environment}` } });
     } catch (error) { return fail("authorization_request_failed", error.message); }
   }
@@ -791,6 +590,7 @@ export class DeliveryControl {
     if (!/^sha256:[0-9a-f]{64}$/.test(input.request_digest || "")) return fail("invalid_request_digest", "request_digest must be sha256:<64 lowercase hex>");
     const auth = this.db.prepare("SELECT * FROM authorizations WHERE authorization_id=? AND flow_id=?").get(input.authorization_id, input.flow_id);
     if (!auth) return fail("authorization_not_found", "authorization request not found");
+    if (auth.delivery_generation !== flow.delivery_generation) return fail("authorization_stale_generation", "authorization belongs to an older delivery generation");
     if (input.request_digest !== auth.request_digest) return fail("authorization_scope_mismatch", "request_digest does not match authorization scope");
     if (Date.parse(auth.expires_at) <= this.clock()) return fail("authorization_expired", "authorization request expired");
     if (auth.confirmed_at) return fail("authorization_already_confirmed", "authorization was already confirmed");
@@ -814,13 +614,14 @@ export class DeliveryControl {
     }
     const auth = this.db.prepare("SELECT * FROM authorizations WHERE authorization_id=? AND flow_id=?").get(input.authorization_id, input.flow_id);
     if (!auth) return fail("authorization_not_found", "authorization request not found");
+    if (auth.delivery_generation !== flow.delivery_generation) return fail("authorization_stale_generation", "authorization belongs to an older delivery generation");
     if (!auth.confirmed_at) return fail("authorization_unconfirmed", "authorization has not been confirmed");
     if (auth.consumed_at) return fail("authorization_replayed", "authorization has already been consumed");
     if (Date.parse(auth.expires_at) <= this.clock()) return fail("authorization_expired", "authorization expired");
     for (const field of ["action", "target", "environment", "request_digest"]) if (input[field] !== auth[field]) return fail("authorization_scope_mismatch", `${field} does not match authorization scope`);
     const consumedAt = nowIso(this.clock);
     const controlDigest = input.control_request_digest || requestDigest("consume_authorization", input, ["flow_id", "expected_revision", "authorization_id", "action", "target", "environment", "request_digest"]);
-    const receipt = { authorization_id: auth.authorization_id, flow_id: auth.flow_id, action: auth.action, target: auth.target, environment: auth.environment, request_digest: auth.request_digest, control_request_digest: controlDigest, confirmed_by: auth.confirmed_by, confirmed_at: auth.confirmed_at, consumed_at: consumedAt };
+    const receipt = { authorization_id: auth.authorization_id, flow_id: auth.flow_id, action: auth.action, target: auth.target, environment: auth.environment, request_digest: auth.request_digest, control_request_digest: controlDigest, confirmed_by: auth.confirmed_by, confirmed_at: auth.confirmed_at, consumed_at: consumedAt, delivery_generation: auth.delivery_generation };
     const receipts = JSON.parse(flow.authorization_receipts_json || "[]");
     const committed = this.commitTransition({ flow_id: flow.flow_id, expected_revision: flow.revision, request_digest: controlDigest, event: "authorization-consumed", reason: `consume authorization ${auth.authorization_id}`, patch: { authorization_receipts: [...receipts, receipt] } });
     if (!committed.ok) return committed;
@@ -828,6 +629,38 @@ export class DeliveryControl {
     this.transaction(() => { changed = this.db.prepare("UPDATE authorizations SET consumed_at=?,consumed_request_digest=? WHERE authorization_id=? AND consumed_at IS NULL").run(consumedAt, controlDigest, auth.authorization_id).changes; });
     if (changed !== 1) return fail("authorization_replayed", "authorization has already been consumed");
     return ok({ receipt, flow: committed.flow });
+  }
+
+  recordExternalActionResult(input) {
+    try {
+      const row = this.row(input.flow_id);
+      if (!row) return fail("flow_not_found", `unknown flow: ${input.flow_id}`);
+      if (row.revision !== input.expected_revision) return fail("revision_conflict", "expected_revision is stale", { actual: row.revision });
+      if (!/^sha256:[0-9a-f]{64}$/.test(input.request_digest || "")) return fail("invalid_request_digest", "request_digest must be sha256:<64 lowercase hex>");
+      const result = { ...input.result, delivery_generation: input.result.delivery_generation ?? row.delivery_generation, legacy_unverified: false };
+      const existing = JSON.parse(row.external_action_results_json || "[]");
+      if (existing.some((item) => item.action_result_id === result.action_result_id)) return fail("action_result_exists", `action result already exists: ${result.action_result_id}`);
+      if (existing.some((item) => item.authorization_id === result.authorization_id)) return fail("authorization_result_already_recorded", "a consumed authorization can prove exactly one external action attempt");
+      const receipts = JSON.parse(row.authorization_receipts_json || "[]");
+      const receipt = receipts.find((item) => item.authorization_id === result.authorization_id && item.delivery_generation === row.delivery_generation);
+      if (!receipt) return fail("authorization_receipt_missing", "action result requires a consumed authorization receipt");
+      for (const [resultField, receiptField] of [["action", "action"], ["target", "target"], ["environment", "environment"], ["action_request_digest", "request_digest"]]) {
+        if (result[resultField] !== receipt[receiptField]) return fail("action_result_scope_mismatch", `${resultField} does not match the consumed authorization`);
+      }
+      for (const field of ["artifact", "artifact_digest", "command_or_request_id"]) assertString(result[field], `action result ${field}`);
+      result.artifact = artifactPath(row.plan_root, result.artifact);
+      if (!existsSync(result.artifact) || !statSync(result.artifact).isFile()) return fail("action_result_artifact_missing", "external action result artifact does not exist");
+      if (fileDigest(result.artifact) !== result.artifact_digest) return fail("action_result_artifact_digest_mismatch", "external action result artifact digest does not match");
+      if (result.supersedes) {
+        const prior = existing.find((item) => item.action_result_id === result.supersedes);
+        if (!prior) return fail("superseded_action_result_missing", "supersedes must reference an existing action result");
+        for (const field of ["action", "target", "environment", "action_request_digest"]) if (prior[field] !== result[field]) return fail("superseded_action_result_scope_mismatch", `superseded result has a different ${field}`);
+      }
+      const normalized = normalizeState({ ...publicFlow(row), external_action_results: [...existing, result] }).external_action_results;
+      const committed = this.commitTransition({ flow_id: row.flow_id, expected_revision: row.revision, request_digest: input.request_digest, event: "external-action-observed", reason: input.reason || `record external action result ${result.action_result_id}`, patch: { external_action_results: normalized } });
+      if (!committed.ok) return committed;
+      return ok({ action_result_id: result.action_result_id, flow: committed.flow });
+    } catch (error) { return fail(error.code || "invalid_action_result", error.message); }
   }
 
   closeFlow(input) {
@@ -840,12 +673,31 @@ export class DeliveryControl {
     const unmet = [...(evidence.ok ? evidence.unmet_criteria : [{ kind: "evidence-validation", error: evidence.error }])];
     if (!consistency.ok || !consistency.consistent) unmet.push({ kind: "consistency", details: consistency });
     if (row.plan_sync !== "confirmed" && row.plan_sync !== "unavailable") unmet.push({ kind: "native-plan", status: row.plan_sync });
+    const route = row.route_json ? JSON.parse(row.route_json) : null;
+    const fixedPoint = JSON.parse(row.fixed_point_json);
+    for (const [phase, field] of [["spec", "spec_digest"], ["execute", "implementation_digest"], ["review", "review_digest"]]) {
+      if (route?.phase_sequence?.includes(phase) && !fixedPoint[field]) unmet.push({ kind: "fixed-point", phase, field });
+    }
     const requiredActions = JSON.parse(row.external_actions_json || "[]");
     const receipts = JSON.parse(row.authorization_receipts_json || "[]");
+    const actionResults = JSON.parse(row.external_action_results_json || "[]");
+    const supersededResults = new Set(actionResults.map((result) => result.supersedes).filter(Boolean));
     for (const action of requiredActions) {
-      const found = action.request_digest && receipts.find((receipt) => receipt.action === action.action && receipt.target === action.target && receipt.environment === action.environment && receipt.request_digest === action.request_digest && receipt.consumed_at);
+      const scopedReceipts = action.request_digest ? receipts.filter((receipt) => receipt.action === action.action && receipt.target === action.target && receipt.environment === action.environment && receipt.request_digest === action.request_digest && receipt.consumed_at && receipt.delivery_generation === row.delivery_generation) : [];
       if (!action.request_digest) unmet.push({ kind: "authorization-scope", action, reason: "external action has no request_digest" });
-      else if (!found) unmet.push({ kind: "authorization", action });
+      else if (!scopedReceipts.length) unmet.push({ kind: "authorization", action });
+      else {
+        const authorizationIds = new Set(scopedReceipts.map((receipt) => receipt.authorization_id));
+        const matching = actionResults.filter((result) => !supersededResults.has(result.action_result_id) && authorizationIds.has(result.authorization_id) && result.action === action.action && result.target === action.target && result.environment === action.environment && result.action_request_digest === action.request_digest && result.delivery_generation === row.delivery_generation);
+        if (!matching.length) unmet.push({ kind: "external-action-result", action });
+        else {
+          const successes = matching.filter((result) => result.outcome === "succeeded");
+          if (!successes.length) unmet.push({ kind: "external-action-failed", action, results: matching.map((result) => ({ action_result_id: result.action_result_id, outcome: result.outcome })) });
+          else if (!successes.some((result) => !result.legacy_unverified && result.artifact && existsSync(result.artifact) && statSync(result.artifact).isFile() && fileDigest(result.artifact) === result.artifact_digest)) {
+            unmet.push({ kind: "external-action-result-unverified", action, action_result_ids: successes.map((result) => result.action_result_id) });
+          }
+        }
+      }
     }
     const gates = JSON.parse(row.gate_json || '{"review_findings":[],"terminal_observation":null}');
     const rawObservation = input.terminal_observation || gates.terminal_observation;
@@ -856,6 +708,10 @@ export class DeliveryControl {
       if (!terminalEvidence) unmet.push({ kind: "terminal-observation-evidence", evidence_id: observation.evidence_id });
     }
     for (const finding of gates.review_findings || []) {
+      const activeReviewSubject = fixedPoint.implementation_digest || fixedPoint.spec_digest || row.scope_digest;
+      if (finding.delivery_generation !== row.delivery_generation || finding.fixed_point_digest !== activeReviewSubject) {
+        continue;
+      }
       if (finding.disposition === "open") unmet.push({ kind: "review-finding", finding_id: finding.finding_id, severity: finding.severity });
       if (["P0", "P1"].includes(finding.severity) && (finding.disposition !== "fixed" || !finding.reverified_by)) unmet.push({ kind: "review-reverification", finding_id: finding.finding_id, disposition: finding.disposition });
     }
@@ -864,7 +720,7 @@ export class DeliveryControl {
   }
 
   cancelFlow(input) {
-    return this.commitTransition({ ...input, event: "user-cancelled", reason: input.reason || "cancelled by user", patch: { ...(input.patch || {}), status: "cancelled", next_phase: "none" } });
+    return this.commitTransition({ ...input, event: "user-cancelled", reason: input.reason || "cancelled by user", patch: { status: "cancelled", next_phase: "none", resume_point: input.resume_point || "Cancelled by user; inspect the last verified evidence before resuming" } });
   }
 
   getMetrics() {

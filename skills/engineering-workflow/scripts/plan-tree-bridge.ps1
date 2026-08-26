@@ -63,7 +63,7 @@ try {
         Write-Output $block
         exit 0
     }
-    throw 'Legacy Plan Tree writes are disabled. Use the delivery-control MCP commit_transition tool.'
+    throw 'Legacy Plan Tree writes are disabled. Use the constrained delivery-control MCP workflow tools.'
 } catch {
     Write-Output "FATAL: $($_.Exception.Message)"
     exit 1

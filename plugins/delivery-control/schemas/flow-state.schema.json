@@ -2,18 +2,131 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Delivery Control flow state",
   "type": "object",
-  "required": ["flow_id", "revision", "flow", "status", "current_phase", "next_phase", "plan_target", "terminal_condition", "resume_point", "review_findings"],
+  "required": [
+    "flow_id",
+    "revision",
+    "flow",
+    "status",
+    "current_phase",
+    "next_phase",
+    "plan_target",
+    "terminal_condition",
+    "resume_point",
+    "delivery_generation",
+    "scope_digest",
+    "fixed_point"
+  ],
   "properties": {
-    "flow_id": {"type": "string", "minLength": 1},
-    "revision": {"type": "integer", "minimum": 0},
-    "flow": {"enum": ["main", "bug", "triage", "wayfinder", "maintenance", "direct"]},
-    "status": {"enum": ["active", "awaiting-user", "blocked-external", "partial", "failed", "complete", "cancelled"]},
-    "current_phase": {"enum": ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"]},
-    "next_phase": {"oneOf": [{"enum": ["route", "setup", "clarify", "prototype", "spec", "tickets", "goal", "execute", "review", "close"]}, {"const": "none"}]},
-    "plan_target": {"type": "string"},
-    "terminal_condition": {"type": "string", "minLength": 1},
-    "resume_point": {"type": "string", "minLength": 1},
-    "review_findings": {"type": "array", "items": {"type": "object", "required": ["finding_id", "severity", "disposition"], "properties": {"finding_id": {"type": "string", "minLength": 1}, "severity": {"enum": ["P0", "P1", "P2", "P3"]}, "disposition": {"enum": ["open", "fixed", "accepted", "deferred"]}, "reason": {"type": ["string", "null"]}, "reverified_by": {"type": ["string", "null"]}}}},
-    "terminal_observation": {"type": ["object", "null"], "required": ["evidence_id", "artifact", "artifact_digest", "observed_at", "result"], "properties": {"evidence_id": {"type": "string", "minLength": 1}, "artifact": {"type": "string", "minLength": 1}, "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "observed_at": {"type": "string", "format": "date-time"}, "result": {"enum": ["passed", "verified", "accepted", "observed"]}}}
+    "flow_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "flow": {
+      "enum": [
+        "main",
+        "bug",
+        "triage",
+        "wayfinder",
+        "maintenance",
+        "direct"
+      ]
+    },
+    "status": {
+      "enum": [
+        "active",
+        "awaiting-user",
+        "blocked-external",
+        "partial",
+        "failed",
+        "complete",
+        "cancelled"
+      ]
+    },
+    "current_phase": {
+      "enum": [
+        "route",
+        "setup",
+        "clarify",
+        "prototype",
+        "spec",
+        "tickets",
+        "goal",
+        "execute",
+        "review",
+        "close"
+      ]
+    },
+    "next_phase": {
+      "enum": [
+        "route",
+        "setup",
+        "clarify",
+        "prototype",
+        "spec",
+        "tickets",
+        "goal",
+        "execute",
+        "review",
+        "close",
+        "none"
+      ]
+    },
+    "plan_target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "terminal_condition": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resume_point": {
+      "type": "string",
+      "minLength": 1
+    },
+    "delivery_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "scope_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "fixed_point": {
+      "type": "object",
+      "required": [
+        "generation",
+        "spec_digest",
+        "implementation_digest",
+        "review_digest"
+      ],
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "spec_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "implementation_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
   }
 }

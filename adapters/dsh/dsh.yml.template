@@ -1,0 +1,8 @@
+- id: delivery-control
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: delivery-control
+    transport: stdio
+    command: node
+    args: ['{SERVER_PATH}']
+    cwd: '{PROJECT_ROOT}'

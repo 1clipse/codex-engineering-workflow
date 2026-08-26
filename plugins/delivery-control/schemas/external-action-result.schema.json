@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "External action result",
+  "type": "object",
+  "required": [
+    "action_result_id",
+    "authorization_id",
+    "action",
+    "target",
+    "environment",
+    "action_request_digest",
+    "outcome",
+    "observed_at",
+    "producer",
+    "result_digest",
+    "artifact",
+    "artifact_digest",
+    "command_or_request_id",
+    "delivery_generation"
+  ],
+  "properties": {
+    "action_result_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authorization_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "environment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action_request_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "outcome": {
+      "enum": [
+        "succeeded",
+        "failed"
+      ]
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "producer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "result_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifact": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "command_or_request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "supersedes": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "delivery_generation": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

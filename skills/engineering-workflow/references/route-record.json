@@ -1,11 +1,11 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "2.0.0",
   "required_fields": [
     "run_id",
     "flow",
     "chosen_procedure",
     "why",
-    "skipped_phases",
+    "phase_sequence",
     "confidence"
   ],
   "confidence_values": ["low", "medium", "high"],

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Engineering Workflow 2.0 交付流程",
+    "output": "assets/engineering-workflow-v2-flowchart.html",
+    "quality_profile": "showcase",
+    "viewBox": [1200, 714]
+  },
+  "lanes": [
+    { "id": "entry", "label": "需求与路由" },
+    { "id": "planning", "label": "规划与设计" },
+    { "id": "delivery", "label": "实现与评审" },
+    { "id": "control", "label": "状态与证据控制" },
+    { "id": "outcome", "label": "授权、终态与恢复", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "route_phase", "label": "识别与路由", "fromCol": 0, "toCol": 1 },
+    { "id": "shape_phase", "label": "澄清与定型", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "deliver_phase", "label": "实现、评审与关闭", "fromCol": 4, "toCol": 5, "variant": "security" }
+  ],
+  "groups": [
+    { "id": "authority_group", "label": "Plan Tree 持久权威", "lane": "control", "fromCol": 0, "toCol": 2, "variant": "dashed" },
+    { "id": "terminal_group", "label": "Delivery Control 终态门禁", "lane": "control", "fromCol": 4, "toCol": 5, "variant": "security" },
+    { "id": "recovery_group", "label": "Fail-closed 恢复路径", "lane": "outcome", "fromCol": 1, "toCol": 2, "variant": "security" }
+  ],
+  "mainPath": [
+    "request",
+    "router",
+    "procedure",
+    "spec",
+    "execute",
+    "review",
+    "gate",
+    "complete"
+  ],
+  "nodes": [
+    { "id": "request", "lane": "entry", "col": 0, "type": "frontend", "label": "用户需求", "sublabel": "功能、Bug、研究或 UI/UX" },
+    { "id": "router", "lane": "entry", "col": 1, "type": "backend", "label": "工程工作流", "sublabel": "$engineering-workflow", "tag": "自动路由", "width": 116 },
+    { "id": "procedure", "lane": "planning", "col": 2, "type": "external", "label": "流程手册", "sublabel": "Ask Matt / Product Design", "tag": "澄清与原型", "width": 100 },
+    { "id": "spec", "lane": "planning", "col": 3, "type": "backend", "label": "SPEC READY", "sublabel": "范围、验收与 fixed point", "tag": "可执行", "width": 100 },
+    { "id": "execute", "lane": "delivery", "col": 4, "type": "backend", "label": "执行实现", "sublabel": "Goal / Tickets / TDD", "tag": "Red → Green → Refactor" },
+    { "id": "review", "lane": "delivery", "col": 5, "type": "security", "label": "代码与设计评审", "sublabel": "Spec + Design QA", "tag": "P0/P1 阻断" },
+    { "id": "gate", "lane": "control", "col": 5, "type": "security", "label": "终态门禁", "sublabel": "证据 / Review / 终态", "tag": "close_flow" },
+    { "id": "complete", "lane": "outcome", "col": 5, "type": "cloud", "label": "交付完成", "sublabel": "complete / close / none", "tag": "可观察终态" },
+    { "id": "plan_tree", "lane": "control", "col": 0, "type": "database", "label": "Plan Tree", "sublabel": "范围 / 决策 / 证据", "tag": "持久权威" },
+    { "id": "controller", "lane": "control", "col": 2, "type": "backend", "label": "Delivery Control", "sublabel": "事务、CAS、恢复与投影", "tag": "本地 stdio MCP", "width": 130 },
+    { "id": "authorization", "lane": "outcome", "col": 4, "type": "security", "label": "精确授权", "sublabel": "授权 + 结果回执", "tag": "外部动作", "width": 100 },
+    { "id": "recover", "lane": "outcome", "col": 2, "type": "security", "label": "冻结并恢复", "sublabel": "恢复后重新路由", "tag": "awaiting-user" }
+  ],
+  "edges": [
+    { "from": "request", "to": "router" },
+    { "from": "router", "to": "procedure", "variant": "emphasis" },
+    { "from": "procedure", "to": "spec" },
+    { "from": "spec", "to": "execute", "variant": "emphasis" },
+    { "from": "execute", "to": "review" },
+    { "from": "review", "to": "gate", "variant": "security" },
+    { "from": "gate", "to": "complete", "variant": "emphasis" },
+    { "from": "plan_tree", "to": "controller", "variant": "dashed", "route": "straight" },
+    { "from": "controller", "to": "gate", "variant": "dashed", "role": "async", "route": "straight" },
+    { "from": "authorization", "to": "gate", "label": "授权 + 结果", "variant": "security", "role": "branch", "labelAt": [565, 539] },
+    { "from": "gate", "to": "execute", "label": "返工", "variant": "security", "role": "return", "route": "return-left", "fromSide": "left", "toSide": "left" },
+    { "from": "controller", "to": "recover", "variant": "security", "role": "error" }
+  ]
+}

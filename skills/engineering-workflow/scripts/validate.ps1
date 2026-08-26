@@ -3,7 +3,8 @@ param(
     [string]$WorkflowRoot = (Split-Path $PSScriptRoot -Parent),
     [string]$AgentsFile,
     [string]$ProductDesignRoot,
-    [string]$DeliveryPluginRoot
+    [string]$DeliveryPluginRoot,
+    [string]$AdaptersRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,6 +91,7 @@ $stateMachineFile = Join-Path $WorkflowRoot 'references\state-machine.json'
 $compatibilityFile = Join-Path $WorkflowRoot 'references\compatibility.json'
 $routeCasesFile = Join-Path $WorkflowRoot 'references\route-cases.json'
 $nativePlanFile = Join-Path $WorkflowRoot 'references\native-plan.json'
+$hostCapabilitiesFile = Join-Path $WorkflowRoot 'references\host-capabilities.json'
 $routeRecordFile = Join-Path $WorkflowRoot 'references\route-record.json'
 $evidenceSchemaFile = Join-Path $WorkflowRoot 'references\evidence-schema.json'
 $stateToolFile = Join-Path $WorkflowRoot 'scripts\workflow-state.ps1'
@@ -104,6 +106,10 @@ $policySyncFile = Join-Path $WorkflowRoot 'scripts\sync-policy.ps1'
 if (-not $DeliveryPluginRoot) {
     $profileRoot = Split-Path (Split-Path $SkillsRoot -Parent) -Parent
     $DeliveryPluginRoot = Join-Path $profileRoot 'plugins\delivery-control'
+}
+if (-not $AdaptersRoot) {
+    $repositoryRoot = Split-Path (Split-Path $WorkflowRoot -Parent) -Parent
+    $AdaptersRoot = Join-Path $repositoryRoot 'adapters'
 }
 $deliveryManifestFile = Join-Path $DeliveryPluginRoot '.codex-plugin\plugin.json'
 $deliveryMcpFile = Join-Path $DeliveryPluginRoot '.mcp.json'
@@ -125,6 +131,7 @@ $deliveryPolicy = Read-Json $deliveryPolicyFile 'Delivery Control workflow polic
 $compatibility = Read-Json $compatibilityFile 'workflow compatibility contract'
 $routeCases = Read-Json $routeCasesFile 'workflow route cases'
 $nativePlan = Read-Json $nativePlanFile 'native Plan contract'
+$hostCapabilities = Read-Json $hostCapabilitiesFile 'host capabilities contract'
 $routeRecord = Read-Json $routeRecordFile 'route-record contract'
 $evidenceSchema = Read-Json $evidenceSchemaFile 'evidence schema'
 $frontmatter = Get-Frontmatter $workflow 'engineering-workflow SKILL.md'
@@ -149,48 +156,12 @@ if ($frontmatter) {
 }
 
 if ($workflow) {
-    $contractFields = @('flow_id', 'revision', 'flow', 'status', 'current_phase', 'next_phase', 'plan_target', 'terminal_condition', 'resume_point', 'terminal_observation', 'review_findings', 'request_digest')
-    foreach ($field in $contractFields) {
-        if ($workflow.IndexOf($field, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            Add-Fatal "Flow contract field is missing: $field"
-        }
-    }
-    foreach ($signal in @('start_or_resume_flow', 'advance_flow', 'record_delivery_evidence', 'record_review_findings', 'close_verified_flow', 'skipped phases', 'request digest')) {
-        if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { Add-Fatal "Workflow upgrade contract is missing: $signal" }
-    }
-
-    $transitionSignals = @('SPEC NOT READY', 'Several frontier tickets', 'blocked-external', 'partial', 'failed fork', 'P0/P1', 'scope or architecture change', 'User cancellation', 'complete/close/none')
-    foreach ($signal in $transitionSignals) {
+    foreach ($signal in @('workflow-policy.json', 'host-capabilities.json', 'Plan Tree', 'delivery-control', 'start or resume', 'advance_phase', 'project_native_plan', 'confirm_native_plan', 'close_flow', 'request_authorization', 'record_external_action_result')) {
         if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            Add-Fatal "Required lifecycle transition is missing: $signal"
+            Add-Fatal "Workflow loader is missing: $signal"
         }
     }
-
-    $authoritySignals = @('commit', 'push', 'PR', 'merge', 'deploy', 'tracker mutation', 'production-data', 'credential access', 'external messages', 'costly service calls')
-    foreach ($signal in $authoritySignals) {
-        if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            Add-Fatal "Required permission boundary is missing: $signal"
-        }
-    }
-    $stateAuthoritySignals = @('CONTEXT.md', 'docs/adr/', 'tracker or `.scratch/`', 'Plan Tree owns', 'SQLite owns only')
-    foreach ($signal in $stateAuthoritySignals) {
-        if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            Add-Fatal "Required state-authority boundary is missing: $signal"
-        }
-    }
-
-    $setupSignals = @('preserve the current state', 'enter `setup`', 're-read it', 'resume')
-    foreach ($signal in $setupSignals) {
-        if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            Add-Fatal "Required resumable setup step is missing: $signal"
-        }
-    }
-
-    foreach ($signal in @('delivery-control', 'expected_revision', 'request_digest', 'select_route', 'commit_transition', 'recover_flow', 'project_native_plan', 'confirm_native_plan', 'validate_evidence', 'request_authorization', 'consume_authorization', 'close_flow', 'unmet_criteria')) {
-        if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            Add-Fatal "Workflow upgrade contract is missing: $signal"
-        }
-    }
+    if ($workflow -notmatch '(?i)JSON is authoritative') { Add-Fatal 'Workflow loader must declare JSON as authoritative.' }
 }
 
 $deliveryManifest = Read-Json $deliveryManifestFile 'Delivery Control plugin manifest'
@@ -200,7 +171,7 @@ $deliveryServer = Read-Text $deliveryServerFile 'Delivery Control bundled MCP se
 if ($deliveryManifest) {
     if ([string]$deliveryManifest.name -ne 'delivery-control') { Add-Fatal 'Delivery Control plugin manifest has the wrong name.' }
     try { $deliveryVersion = [version]([string]$deliveryManifest.version -replace '\+.*$','') } catch { Add-Fatal 'Delivery Control plugin version is invalid.'; $deliveryVersion = $null }
-    if ($deliveryVersion -and $deliveryVersion -lt [version]'1.0.0') { Add-Fatal 'Delivery Control plugin 1.0.0 or newer is required.' }
+    if ($deliveryVersion -and $deliveryVersion -lt [version]'2.0.0') { Add-Fatal 'Delivery Control plugin 2.0.0 or newer is required.' }
     if ([string]$deliveryManifest.mcpServers -ne './.mcp.json' -or [string]$deliveryManifest.skills -ne './skills/') { Add-Fatal 'Delivery Control manifest must expose its MCP server and Skills.' }
 }
 if ($deliveryMcp) {
@@ -226,12 +197,49 @@ if ($deliveryServer) {
 if ($stateMachine -and $deliveryPolicy) {
     $canonicalPolicy = (Get-Content -LiteralPath $stateMachineFile -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 30 -Compress)
     $bundledPolicy = (Get-Content -LiteralPath $deliveryPolicyFile -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 30 -Compress)
-    if ($canonicalPolicy -ne $bundledPolicy) { Add-Fatal 'Delivery Control policy copy differs from the canonical workflow state-machine.json; run sync-policy.ps1.' }
+    if ($canonicalPolicy -ne $bundledPolicy) { Add-Fatal 'Generated workflow state-machine.json differs from the canonical Delivery Control policy; run sync-policy.ps1.' }
+}
+if ($stateMachine) {
+    if (-not $stateMachine.delivery_protocol -or -not $stateMachine.host_profiles) {
+        Add-Fatal 'Canonical workflow JSON must define delivery_protocol and host_profiles.'
+    }
+    foreach ($field in @('authority', 'external_actions', 'evidence_required_fields', 'close_gates', 'host_plan')) {
+        if (-not $stateMachine.delivery_protocol.PSObject.Properties[$field]) { Add-Fatal "Canonical delivery_protocol is missing: $field" }
+    }
+}
+if ($hostCapabilities) {
+    if ([string]$hostCapabilities.authority -ne 'plugins/delivery-control/schemas/workflow-policy.json') {
+        Add-Fatal 'Host capabilities contract has the wrong canonical authority.'
+    }
+    foreach ($agentHost in @('codex', 'claude-code', 'opencode', 'pi', 'dsh', 'zcode')) {
+        $profile = $hostCapabilities.hosts.PSObject.Properties[$agentHost]
+        if (-not $profile -or -not $profile.Value.support -or -not $profile.Value.adapter) { Add-Fatal "Host capabilities profile is incomplete: $agentHost" }
+    }
+}
+$adapterFiles = @(
+    'README.md', 'install-adapter.ps1', 'host-capabilities.json',
+    'claude-code\SKILL.md', 'claude-code\claude-code.json.template',
+    'opencode\engineering-workflow.md', 'opencode\opencode.json.template',
+    'pi\SKILL.md', 'pi\index.ts', 'pi\package.json',
+    'dsh\AGENTS.md', 'dsh\dsh.yml.template',
+    'zcode\AGENTS.md', 'zcode\probe-zcode.ps1'
+)
+foreach ($adapterFile in $adapterFiles) {
+    $path = Join-Path $AdaptersRoot $adapterFile
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Add-Fatal "Cross-Agent adapter asset is missing: $adapterFile" }
+}
+if ($hostCapabilities -and (Test-Path -LiteralPath (Join-Path $AdaptersRoot 'host-capabilities.json') -PathType Leaf)) {
+    $adapterCapabilities = Read-Json (Join-Path $AdaptersRoot 'host-capabilities.json') 'generated adapter host capabilities'
+    if ($adapterCapabilities) {
+        $workflowHostJson = ($hostCapabilities | ConvertTo-Json -Depth 30 -Compress)
+        $adapterHostJson = ($adapterCapabilities | ConvertTo-Json -Depth 30 -Compress)
+        if ($workflowHostJson -ne $adapterHostJson) { Add-Fatal 'Generated adapter host capabilities differ from the workflow reference.' }
+    }
 }
 if ($bridgeToolFile -and (Read-Text $bridgeToolFile 'legacy Plan Tree bridge') -notmatch 'Legacy Plan Tree writes are disabled') { Add-Fatal 'Legacy Plan Tree bridge still exposes a write path.' }
 
 if ($stateMachine) {
-    if ([string]$stateMachine.schema_version -ne '1.0.0') { Add-Fatal 'Unexpected state-machine schema_version.' }
+    if ([string]$stateMachine.schema_version -ne '2.0.0') { Add-Fatal 'Unexpected state-machine schema_version.' }
     $expectedFields = @('flow', 'status', 'current_phase', 'next_phase', 'plan_target', 'terminal_condition', 'resume_point')
     foreach ($field in $expectedFields) {
         if ($field -notin @($stateMachine.required_fields)) { Add-Fatal "State-machine required field is missing: $field" }
@@ -259,8 +267,10 @@ if ($stateMachine) {
     foreach ($flow in @('main', 'bug', 'triage', 'wayfinder', 'maintenance', 'direct')) {
         $requiredProperty = $stateMachine.required_phases_by_flow.PSObject.Properties[$flow]
         if (-not $requiredProperty) { Add-Fatal "State-machine required phase set is missing: $flow" }
+        $templateProperty = $stateMachine.route_templates.PSObject.Properties[$flow]
+        if (-not $templateProperty -or @($templateProperty.Value)[0] -ne 'route' -or @($templateProperty.Value)[-1] -ne 'close') { Add-Fatal "State-machine route template is invalid: $flow" }
     }
-    foreach ($event in @('advance', 'route-selected', 'spec-not-ready', 'several-frontiers', 'user-decision-needed',
+    foreach ($event in @('advance', 'phase-completed', 'external-action-observed', 'route-selected', 'spec-not-ready', 'several-frontiers', 'user-decision-needed',
             'external-blocker', 'partial-result', 'execution-blocked', 'unrecoverable-failure',
             'review-p0-p1', 'review-recorded', 'scope-change', 'user-cancelled', 'user-resumed', 'terminal-verified')) {
         if (-not $stateMachine.event_rules.PSObject.Properties[$event]) {
@@ -270,7 +280,7 @@ if ($stateMachine) {
 }
 
 if ($compatibility) {
-    if ([string]$compatibility.schema_version -ne '1.0.0') { Add-Fatal 'Unexpected compatibility schema_version.' }
+    if ([string]$compatibility.schema_version -ne '2.0.0') { Add-Fatal 'Unexpected compatibility schema_version.' }
     if (-not $compatibility.plan_tree.minimum_version) { Add-Fatal 'Compatibility contract is missing Plan Tree minimum_version.' }
     if (-not $compatibility.ask_matt.router_file -or -not $compatibility.ask_matt.phase_boundaries_file) {
         Add-Fatal 'Compatibility contract is missing Ask Matt file boundaries.'
@@ -318,7 +328,7 @@ if ($routeCases) {
 if ($nativePlan) {
     if ([string]$nativePlan.schema_version -ne '2.0.0') { Add-Fatal 'Unexpected native-plan schema_version.' }
     if ([string]$nativePlan.scope -notmatch 'current-session-only' -or @($nativePlan.handshake).Count -ne 3) {
-        Add-Fatal 'Native Plan contract must define the projection/update_plan/confirmation handshake.'
+        Add-Fatal 'Host-plan contract must define the projection/application/confirmation handshake.'
     }
     if (-not $nativePlan.projection_scope) { Add-Fatal 'Native Plan contract must define projection_scope.' }
     foreach ($phase in @('route', 'setup', 'clarify', 'prototype', 'spec', 'tickets', 'goal', 'execute', 'review', 'close')) {
@@ -327,8 +337,8 @@ if ($nativePlan) {
 }
 
 if ($routeRecord) {
-    if ([string]$routeRecord.schema_version -ne '1.0.0') { Add-Fatal 'Unexpected route-record schema_version.' }
-    foreach ($field in @('run_id', 'flow', 'chosen_procedure', 'why', 'skipped_phases', 'confidence')) {
+    if ([string]$routeRecord.schema_version -ne '2.0.0') { Add-Fatal 'Unexpected route-record schema_version.' }
+    foreach ($field in @('run_id', 'flow', 'chosen_procedure', 'why', 'phase_sequence', 'confidence')) {
         if ($field -notin @($routeRecord.required_fields)) { Add-Fatal "Route-record required field is missing: $field" }
     }
     foreach ($confidence in @('low', 'medium', 'high')) {
@@ -338,7 +348,7 @@ if ($routeRecord) {
 
 if ($evidenceSchema) {
     if ([string]$evidenceSchema.schema_version -ne '2.0.0') { Add-Fatal 'Unexpected evidence schema_version.' }
-    foreach ($field in @('evidence_id', 'acceptance_ids', 'type', 'result', 'artifact', 'artifact_digest', 'command_or_request_id', 'observed_at', 'producer', 'environment')) {
+    foreach ($field in @('evidence_id', 'acceptance_ids', 'type', 'result', 'artifact', 'artifact_digest', 'command_or_request_id', 'observed_at', 'producer', 'environment', 'delivery_generation', 'subject_digest')) {
         if ($field -notin @($evidenceSchema.required_fields)) { Add-Fatal "Evidence required field is missing: $field" }
     }
 }
@@ -395,7 +405,7 @@ if ($askMatt) {
         } else { $checkedSkills.Add($procedure) }
     }
 
-    if ($workflow -notmatch '(?is)PHASE-BOUNDARIES.*handoff') { Add-Fatal 'Ask Matt phase-boundary handoff fallback is not documented.' }
+    if (-not $phaseBoundariesFile) { Add-Fatal 'Ask Matt phase-boundary reference is unavailable.' }
 }
 
 if ($workflow -and $workflow -match '(?i)Product Design') {
@@ -426,11 +436,6 @@ if ($workflow -and $workflow -match '(?i)Product Design') {
             $designFile = Join-Path $ProductDesignRoot "skills\$designSkill\SKILL.md"
             if (-not (Test-Path -LiteralPath $designFile -PathType Leaf)) {
                 Add-Fatal "Product Design focused Skill is missing: $designSkill"
-            }
-        }
-        foreach ($signal in @('get-context', 'three directions', 'Audit-only', 'design-qa.md', 'final result: passed', 'image-to-code', 'url-to-code')) {
-            if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-                Add-Fatal "Product Design integration rule is missing: $signal"
             }
         }
     }

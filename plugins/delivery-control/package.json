@@ -1,6 +1,6 @@
 {
   "name": "delivery-control",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "author": "1clipse",
   "homepage": "https://github.com/1clipse/codex-engineering-workflow",
@@ -11,9 +11,11 @@
   },
   "type": "module",
   "scripts": {
-    "build": "esbuild src/server.mjs --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.mjs --banner:js=\"import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);\"",
+    "generate": "node scripts/generate-policy.mjs",
+    "generate:check": "node scripts/generate-policy.mjs --check",
+    "build": "npm run generate:check && esbuild src/server.mjs --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.mjs --banner:js=\"import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);\"",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
-    "check": "npm run build && npm test"
+    "check": "npm run generate:check && npm run build && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.3",

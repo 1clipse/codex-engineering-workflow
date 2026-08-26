@@ -34,17 +34,17 @@ try {
     Assert-Case 'native Plan includes execute' $native 0 'Implement the approved contract'
     Assert-Case 'native Plan includes remaining close gate' $native 0 'Verify the terminal condition'
 
-    $route = Write-JsonFile 'route.json' @{ run_id='run-1'; flow='main'; chosen_procedure='implement'; why='Small approved change'; skipped_phases=@('prototype','tickets'); confidence='high' }
+    $route = Write-JsonFile 'route.json' @{ run_id='run-1'; flow='main'; chosen_procedure='implement'; why='Small approved change'; phase_sequence=@('route','clarify','spec','execute','review','close'); confidence='high' }
     Assert-Case 'route record' (Invoke-Tool 'route-record.ps1' @('-RecordPath', $route)) 0 'chosen_procedure'
-    $lowRoute = Write-JsonFile 'route-low.json' @{ run_id='run-2'; flow='main'; chosen_procedure='undecided'; why='Two routes remain plausible'; skipped_phases=@(); confidence='low' }
+    $lowRoute = Write-JsonFile 'route-low.json' @{ run_id='run-2'; flow='main'; chosen_procedure='undecided'; why='Two routes remain plausible'; phase_sequence=@('route','clarify','spec','execute','review','close'); confidence='low' }
     Assert-Case 'low confidence route pauses' (Invoke-Tool 'route-record.ps1' @('-RecordPath', $lowRoute)) 0 'request the smallest user route choice'
 
     $evidence = Write-JsonFile 'evidence.json' @(
-        @{ evidence_id='E-1'; acceptance_ids=@('AC-1'); type='test'; result='passed'; artifact='test-receipt.json'; artifact_digest=('sha256:' + ('0' * 64)); command_or_request_id='test'; observed_at='2026-08-13T00:00:00Z'; producer='test'; environment='local' },
-        @{ evidence_id='E-2'; acceptance_ids=@('AC-2'); type='review'; result='verified'; artifact='review-receipt.json'; artifact_digest=('sha256:' + ('1' * 64)); command_or_request_id='review'; observed_at='2026-08-13T00:01:00Z'; producer='reviewer'; environment='local' }
+        @{ evidence_id='E-1'; acceptance_ids=@('AC-1'); type='test'; result='passed'; artifact='test-receipt.json'; artifact_digest=('sha256:' + ('0' * 64)); command_or_request_id='test'; observed_at='2026-08-13T00:00:00Z'; producer='test'; environment='local'; delivery_generation=1; subject_digest=('sha256:' + ('2' * 64)) },
+        @{ evidence_id='E-2'; acceptance_ids=@('AC-2'); type='review'; result='verified'; artifact='review-receipt.json'; artifact_digest=('sha256:' + ('1' * 64)); command_or_request_id='review'; observed_at='2026-08-13T00:01:00Z'; producer='reviewer'; environment='local'; delivery_generation=1; subject_digest=('sha256:' + ('2' * 64)) }
     )
     Assert-Case 'structured evidence' (Invoke-Tool 'validate-evidence.ps1' @('-EvidencePath', $evidence)) 0 '2 structured evidence record'
-    $badEvidence = Write-JsonFile 'bad-evidence.json' @(@{ evidence_id='E-bad'; acceptance_ids=@('AC-1'); type='test'; result='failed'; artifact='test-receipt.json'; artifact_digest=('sha256:' + ('0' * 64)); command_or_request_id='test'; observed_at='2026-08-13T00:00:00Z'; producer='test'; environment='local' })
+    $badEvidence = Write-JsonFile 'bad-evidence.json' @(@{ evidence_id='E-bad'; acceptance_ids=@('AC-1'); type='test'; result='failed'; artifact='test-receipt.json'; artifact_digest=('sha256:' + ('0' * 64)); command_or_request_id='test'; observed_at='2026-08-13T00:00:00Z'; producer='test'; environment='local'; delivery_generation=1; subject_digest=('sha256:' + ('2' * 64)) })
     Assert-Case 'failed evidence rejected' (Invoke-Tool 'validate-evidence.ps1' @('-EvidencePath', $badEvidence)) 1 'invalid result'
 
     $planRoot = Join-Path $tempRoot 'docs\plantree\plans\001-demo'

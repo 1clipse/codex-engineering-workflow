@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "delivery-control": {
+      "command": "node",
+      "args": [
+        "{SERVER_PATH}"
+      ],
+      "cwd": "{PROJECT_ROOT}"
+    }
+  }
+}

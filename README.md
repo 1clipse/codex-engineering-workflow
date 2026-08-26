@@ -1,8 +1,8 @@
 # Codex Engineering Workflow
 
-一个面向 Codex 的完整工程交付工作流：从需求路由、澄清、规格、执行和评审，一直管理到证据闭环、权限确认与可恢复关闭。
+一个以 JSON 为权威、可适配多个 Coding Agent 的完整工程交付工作流：从需求路由、澄清、规格、执行和评审，一直管理到证据闭环、权限确认与可恢复关闭。
 
-它不是传统 Plan Mode 的替代品，而是将短期计划、长期计划树、具体工程流程和事务控制组合成一条可验证的交付链路。
+它不是传统 Plan Mode 的替代品，而是将短期计划、长期计划树、具体工程流程和事务控制组合成一条可验证的交付链路。Codex 是原始宿主，但核心状态、门禁和 MCP 控制器不依赖 Codex。
 
 ## 工作流总览
 
@@ -17,7 +17,7 @@
 - 自动判断直接实现、常规交付、复杂决策、UI/UX 和纯计划维护路线。
 - 读取并应用 Ask Matt 的 procedure manual，完成澄清、spec、tickets、goal、TDD 和 review 等阶段。
 - 以 Plan Tree 作为唯一持久业务权威，保存范围、决策、阶段、证据与恢复点。
-- 通过 Delivery Control MCP 管理事务、CAS revision、lease、崩溃恢复、漂移检测和 native Plan 同步。
+- 通过 Delivery Control MCP 管理事务、CAS revision、lease、崩溃恢复、漂移检测和 host-plan 同步或 handoff。
 - 以结构化 evidence、terminal observation、Review disposition 和 terminal condition 作为完成门禁，阶段完成不等于交付完成。
 - 对 commit、push、PR、merge、deploy、生产操作和外部通信采用精确、短期、单次授权。
 - 通过高层入口隐藏普通流程中的 CAS、lease、Plan projection 和 evidence 事务细节。
@@ -27,6 +27,7 @@
 - 授权同时保留外部动作 digest 与控制器 mutation digest，旧 SQLite schema 会自动迁移，事务备份保存在专用目录并限制保留数量。
 - 外部动作把“已授权”和“已成功”分开验证：每次授权只允许一个结果，失败重试必须重新授权，并以本地回执 artifact/digest 证明结果。
 - 路线策略、运行时常量、JSON Schema 与 workflow 引用由一个 canonical policy 生成，并由 drift check 阻止副本分叉。
+- 工作流规则不再由长篇 Skill 提示词承载：canonical JSON 定义路线、状态机、权限、证据、终态门禁和宿主能力；各 Agent 文件只负责加载 JSON 与连接控制器。
 
 ## 组件关系
 
@@ -38,9 +39,22 @@
 | `delivery-control` | 本地事务、锁、恢复、证据、授权、指标和同步控制 |
 | Product Design | 可选；处理 UI/UX 设计与设计 QA |
 
+## Agent 兼容性
+
+| Agent | 支持级别 | 方式 |
+| --- | --- | --- |
+| Codex | 原生 | Skill、Plugin 与 MCP；可确认原生 Plan 投影 |
+| Claude Code | 原生 MCP | `.mcp.json` 片段与薄 Skill 入口 |
+| OpenCode | 原生 MCP | `opencode.json` 片段与 Command 入口 |
+| Pi | 本地 Bridge | Pi Skill + TypeScript stdio MCP bridge |
+| DSH / DeepSeek Harness | 原生 MCP | `cordis.yml` 片段 |
+| ZCode | 需探测 | 先检测 MCP/ACP/Plugin 能力；未确认前仅使用共享 Plan Tree 与 JSON |
+
+详细安装和能力边界见 [adapters/README.md](adapters/README.md)。不会为未确认的宿主伪造 native Plan、MCP 或插件支持。
+
 ## 要求
 
-- Codex Desktop 或支持 Skills 与本地 MCP 插件的 Codex 环境
+- Codex、Claude Code、OpenCode、Pi、DSH，或其他支持本地 stdio MCP 的 Agent
 - [Ask Matt](https://github.com/tt-a1i/matt-skills-with-to-goal)
 - [Plan Tree](https://github.com/SeemSeam/plan-tree) `>= 0.4.0`
 - Node.js 24（用于构建和运行 `delivery-control`）
@@ -53,7 +67,7 @@
 
 请先按各自仓库的说明安装 Ask Matt 与 Plan Tree。本仓库不复制或重新分发这两个项目。
 
-### 2. 安装 Engineering Workflow
+### 2. 安装 Codex 适配器
 
 将 `skills/engineering-workflow` 复制到 Codex 的个人 Skills 目录：
 
@@ -61,7 +75,7 @@
 Copy-Item -Recurse -Force .\skills\engineering-workflow "$env:USERPROFILE\.codex\skills\engineering-workflow"
 ```
 
-### 3. 构建并安装 Delivery Control
+### 3. 构建 Delivery Control
 
 ```powershell
 Set-Location .\plugins\delivery-control
@@ -74,6 +88,18 @@ codex plugin add delivery-control@codex-engineering-workflow
 
 不同 Codex CLI 版本的插件命令可能略有差异，请以当前 Codex 插件文档和 `codex plugin --help` 为准。安装或升级插件后，新建一个 Codex 任务以加载新的 Skill 和 MCP 工具。
 
+### 4. 安装其他 Agent 适配器
+
+先构建完成 `delivery-control`，再生成一个不覆盖现有配置的本地片段：
+
+```powershell
+./adapters/install-adapter.ps1 -Host claude-code
+./adapters/install-adapter.ps1 -Host opencode
+./adapters/install-adapter.ps1 -Host dsh
+```
+
+审阅生成片段后再合并到各 Agent 的宿主配置。Pi 使用 `adapters/pi/` 的本地 bridge；ZCode 先运行 `./adapters/zcode/probe-zcode.ps1`，只有确认官方支持的协议后才配置。
+
 ## 使用
 
 日常功能、复杂 Bug、研究、架构或跨会话交付：
@@ -83,6 +109,8 @@ $engineering-workflow 实现用户权限管理，并完成测试和评审
 ```
 
 也可以直接用自然语言提出非简单工程任务，满足 Skill 触发条件时由 Codex 自动路由。
+
+在 Claude Code、OpenCode、Pi 或 DSH 中，使用其对应的 `adapters/` 入口；入口会读取同一份 `plugins/delivery-control/schemas/workflow-policy.json`，再通过 MCP 调用同一组控制工具。
 
 仅维护计划树时直接调用：
 
@@ -101,7 +129,7 @@ $delivery-control 审计当前 flow，检查漂移和未满足的验收项
 ```text
 start_or_resume_flow       # 初始化或恢复
 select_route               # 选择控制器内置路线模板
-advance_phase              # 按模板推进并生成 native Plan projection
+advance_phase              # 按模板推进并生成 host-plan projection
 revise_scope               # 新建交付代际并清空旧 fixed point
 record_delivery_evidence  # 记录证据并返回当前门禁
 record_review_findings     # 记录 Review disposition
@@ -131,7 +159,7 @@ npm run check
 
 Plan Tree 投影产生的恢复备份位于目标目录下的 `.delivery-control-backups/`，默认最多保留最近 5 份；SQLite schema 会在插件启动时执行受控迁移，不需要删除现有状态库。
 
-控制器不会替用户执行 commit、push、PR、merge、deploy、生产变更或外部消息；它只记录并验证这些动作是否持有匹配的授权。外部动作的授权必须同时匹配 action、target、environment 和精确 request digest。它是交付协议控制层，不是 Codex 宿主级安全沙箱。
+控制器不会替用户执行 commit、push、PR、merge、deploy、生产变更或外部消息；它只记录并验证这些动作是否持有匹配的授权。外部动作的授权必须同时匹配 action、target、environment 和精确 request digest。它是交付协议控制层，不是任何 Agent 宿主级安全沙箱。
 
 ## 特别鸣谢 / Special Thanks
 
