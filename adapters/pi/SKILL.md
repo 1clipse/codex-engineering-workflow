@@ -5,4 +5,4 @@ description: Start a JSON-controlled delivery flow through the local Delivery Co
 
 # Engineering Workflow
 
-Read `plugins/delivery-control/schemas/workflow-policy.json`. Use the `delivery_control` Pi tool for durable flow changes and keep business state in Plan Tree. Pi has no native host-plan confirmation, so record an unavailable handoff when a phase boundary requires plan synchronization.
+Read `plugins/delivery-control/schemas/workflow-policy.json`. Use the `delivery_control` Pi tool for the seven high-level durable-flow operations and keep business state in Plan Tree. Pi has no native host-plan confirmation, but that does not block a phase boundary or evidence-based close: host planning is optional session guidance.

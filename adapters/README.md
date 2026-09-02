@@ -27,6 +27,6 @@ Merge the generated fragment into the host-owned configuration only after review
 
 ## Host Bootstrap
 
-Each host bootstrap has one responsibility: load the canonical JSON definition, work through `delivery-control`, and record a handoff when its own plan feature cannot be confirmed. Plan Tree remains the durable planning authority.
+Each host bootstrap has one responsibility: load the canonical JSON definition and work through the seven high-level `delivery-control` operations. Plan Tree remains the durable planning authority. A host-native plan is optional session guidance; when absent, record a concrete handoff but never block evidence-based closure solely for lack of a host plan.
 
 Official integration references are recorded in [the compatibility research](../docs/plantree/plans/001-engineering-workflow-v2/topics/cross-agent-host-compatibility.md).

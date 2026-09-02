@@ -31,6 +31,8 @@ try {
 
     $native = Invoke-Tool 'native-plan.ps1' @('-StatePath', $state)
     Assert-Case 'native Plan mapping' $native 0 'current-session-only'
+    Assert-Case 'native Plan is advisory' $native 0 'advisory-runtime-projection'
+    Assert-Case 'native Plan is not a close gate' $native 0 '"required_for_close":\s*false'
     Assert-Case 'native Plan includes execute' $native 0 'Implement the approved contract'
     Assert-Case 'native Plan includes remaining close gate' $native 0 'Verify the terminal condition'
 

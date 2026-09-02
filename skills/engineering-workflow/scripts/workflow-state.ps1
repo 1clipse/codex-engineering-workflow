@@ -56,6 +56,27 @@ try {
 
     foreach ($field in @($contract.required_fields)) { [void](Test-RequiredText $state ([string]$field)) }
 
+    # This script remains a read-only compatibility checker. Policy-pinned states
+    # are checked when present; older Plan Tree artifacts can still be inspected
+    # and must be migrated through Delivery Control rather than rewritten here.
+    $policyFields = @('mode', 'policy_id', 'policy_version', 'policy_digest')
+    $presentPolicyFields = @($policyFields | Where-Object { $state.PSObject.Properties[$_] })
+    if ($presentPolicyFields.Count -gt 0) {
+        foreach ($field in $policyFields) { [void](Test-RequiredText $state $field) }
+        if ([string]$state.policy_id -ne [string]$contract.policy_id) {
+            $errors.Add("State policy_id '$($state.policy_id)' does not match canonical policy '$($contract.policy_id)'.")
+        }
+        if ([string]$state.policy_version -ne [string]$contract.schema_version) {
+            $errors.Add("State policy_version '$($state.policy_version)' does not match canonical schema '$($contract.schema_version)'.")
+        }
+        if ([string]$state.policy_digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            $errors.Add('State policy_digest must be sha256:<64 lowercase hexadecimal characters>.')
+        }
+        if ($state.mode -notin @($contract.modes.profiles.PSObject.Properties.Name)) {
+            $errors.Add("State mode is not defined by the canonical policy: $($state.mode)")
+        }
+    }
+
     if ($state.flow -notin @($contract.flows)) { $errors.Add("Unknown flow: $($state.flow)") }
     if ($state.status -notin @($contract.statuses)) { $errors.Add("Unknown status: $($state.status)") }
     if ($state.current_phase -notin @($contract.phases)) { $errors.Add("Unknown current_phase: $($state.current_phase)") }

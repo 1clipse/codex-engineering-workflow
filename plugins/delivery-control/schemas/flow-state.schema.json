@@ -14,7 +14,11 @@
     "resume_point",
     "delivery_generation",
     "scope_digest",
-    "fixed_point"
+    "fixed_point",
+    "mode",
+    "policy_id",
+    "policy_version",
+    "policy_digest"
   ],
   "properties": {
     "flow_id": {
@@ -94,6 +98,21 @@
     "scope_digest": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "mode": {
+      "enum": [
+        "standard",
+        "strict"
+      ]
+    },
+    "policy_id": {
+      "const": "com.1clipse.policy-driven-delivery-protocol"
+    },
+    "policy_version": {
+      "const": "3.0.0"
+    },
+    "policy_digest": {
+      "const": "sha256:b19e75275115e6dc0343fb2db5751b41b05d39da6db59a41544575dfd006aeb7"
     },
     "fixed_point": {
       "type": "object",

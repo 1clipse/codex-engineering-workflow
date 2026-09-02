@@ -116,13 +116,30 @@ $deliveryMcpFile = Join-Path $DeliveryPluginRoot '.mcp.json'
 $deliverySkillFile = Join-Path $DeliveryPluginRoot 'skills\delivery-control\SKILL.md'
 $deliveryServerFile = Join-Path $DeliveryPluginRoot 'dist\server.mjs'
 $deliveryPolicyFile = Join-Path $DeliveryPluginRoot 'schemas\workflow-policy.json'
+$deliveryStateSchemaFile = Join-Path $DeliveryPluginRoot 'schemas\flow-state.schema.json'
+$deliveryHooksRoot = Join-Path $DeliveryPluginRoot 'hooks'
+$deliveryHookTemplateFile = Join-Path $deliveryHooksRoot 'hooks.json.template'
+$deliveryHookScriptFile = Join-Path $deliveryHooksRoot 'lifecycle-advisory.mjs'
+$deliveryHookReadmeFile = Join-Path $deliveryHooksRoot 'README.md'
 if (-not $AgentsFile) { $AgentsFile = Join-Path (Split-Path $SkillsRoot -Parent) 'AGENTS.md' }
 if (-not $ProductDesignRoot) {
-    $pluginRoot = Join-Path (Split-Path $SkillsRoot -Parent) 'plugins\cache\openai-curated-remote\product-design'
+    $codexRoot = Split-Path $SkillsRoot -Parent
+    $pluginRoot = Join-Path $codexRoot 'plugins\cache\openai-curated-remote\product-design'
     $candidate = Get-ChildItem -LiteralPath $pluginRoot -Directory -ErrorAction SilentlyContinue |
         Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } -Descending |
         Select-Object -First 1
     if ($candidate) { $ProductDesignRoot = $candidate.FullName }
+    if (-not $ProductDesignRoot) {
+        foreach ($candidatePath in @(
+            (Join-Path $codexRoot '.tmp\plugins\plugins\product-design'),
+            (Join-Path $codexRoot '.tmp\plugins-remote\plugins\product-design')
+        )) {
+            if (Test-Path -LiteralPath (Join-Path $candidatePath '.codex-plugin\plugin.json') -PathType Leaf) {
+                $ProductDesignRoot = $candidatePath
+                break
+            }
+        }
+    }
 }
 
 $workflow = Read-Text $workflowFile 'engineering-workflow SKILL.md'
@@ -156,22 +173,27 @@ if ($frontmatter) {
 }
 
 if ($workflow) {
-    foreach ($signal in @('workflow-policy.json', 'host-capabilities.json', 'Plan Tree', 'delivery-control', 'start or resume', 'advance_phase', 'project_native_plan', 'confirm_native_plan', 'close_flow', 'request_authorization', 'record_external_action_result')) {
+    foreach ($signal in @('references/state-machine.json', 'workflow-policy.json', 'Plan Tree', 'delivery-control', 'start_or_resume_flow', 'route_flow', 'checkpoint_flow', 'record_evidence', 'authorize_external_action', 'audit_or_recover_flow', 'close_or_cancel_flow')) {
         if ($workflow.IndexOf($signal, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
             Add-Fatal "Workflow loader is missing: $signal"
         }
     }
-    if ($workflow -notmatch '(?i)JSON is authoritative') { Add-Fatal 'Workflow loader must declare JSON as authoritative.' }
+    if ($workflow -notmatch '(?is)JSON policy.*?(machine-checked|authoritative|canonical)') { Add-Fatal 'Workflow loader must declare the JSON policy authoritative.' }
+    if ($workflow -notmatch '(?is)Host plan.*?(optional|advisory)') { Add-Fatal 'Workflow loader must describe host-native plans as advisory.' }
 }
 
 $deliveryManifest = Read-Json $deliveryManifestFile 'Delivery Control plugin manifest'
 $deliveryMcp = Read-Json $deliveryMcpFile 'Delivery Control MCP configuration'
 $deliverySkill = Read-Text $deliverySkillFile 'delivery-control SKILL.md'
 $deliveryServer = Read-Text $deliveryServerFile 'Delivery Control bundled MCP server'
+$deliveryStateSchema = Read-Json $deliveryStateSchemaFile 'Delivery Control generated flow-state schema'
+$deliveryHookTemplate = Read-Json $deliveryHookTemplateFile 'Delivery Control lifecycle hook template'
+$deliveryHookScript = Read-Text $deliveryHookScriptFile 'Delivery Control lifecycle hook script'
+$deliveryHookReadme = Read-Text $deliveryHookReadmeFile 'Delivery Control lifecycle hook documentation'
 if ($deliveryManifest) {
     if ([string]$deliveryManifest.name -ne 'delivery-control') { Add-Fatal 'Delivery Control plugin manifest has the wrong name.' }
     try { $deliveryVersion = [version]([string]$deliveryManifest.version -replace '\+.*$','') } catch { Add-Fatal 'Delivery Control plugin version is invalid.'; $deliveryVersion = $null }
-    if ($deliveryVersion -and $deliveryVersion -lt [version]'2.0.0') { Add-Fatal 'Delivery Control plugin 2.0.0 or newer is required.' }
+    if ($deliveryVersion -and $deliveryVersion -lt [version]'3.0.0') { Add-Fatal 'Delivery Control plugin 3.0.0 or newer is required.' }
     if ([string]$deliveryManifest.mcpServers -ne './.mcp.json' -or [string]$deliveryManifest.skills -ne './skills/') { Add-Fatal 'Delivery Control manifest must expose its MCP server and Skills.' }
 }
 if ($deliveryMcp) {
@@ -189,22 +211,93 @@ if ($deliveryMcp) {
     }
 }
 if ($deliverySkill -and $deliverySkill -notmatch '(?m)^name:\s*delivery-control\s*$') { Add-Fatal 'Delivery Control Skill identity is invalid.' }
-if ($deliveryServer) {
-    foreach ($tool in @($compatibility.delivery_control.required_tools)) {
-        if ($deliveryServer.IndexOf($tool, [System.StringComparison]::Ordinal) -lt 0) { Add-Fatal "Delivery Control MCP tool is missing: $tool" }
+if ($deliveryServer -and $compatibility) {
+    $registeredTools = @([regex]::Matches($deliveryServer, '(?m)^\s*register\(\s*["''](?<name>[A-Za-z0-9_-]+)["'']') |
+        ForEach-Object { $_.Groups['name'].Value } | Sort-Object -Unique)
+    $expectedTools = @($compatibility.delivery_control.public_tools | Sort-Object -Unique)
+    foreach ($tool in $expectedTools) {
+        if ($tool -notin $registeredTools) { Add-Fatal "Delivery Control MCP tool is missing: $tool" }
     }
+    foreach ($tool in $registeredTools) {
+        if ($tool -notin $expectedTools) { Add-Fatal "Delivery Control MCP public interface has unexpected tool: $tool" }
+    }
+    foreach ($legacyTool in @($compatibility.delivery_control.legacy_tools)) {
+        if ($legacyTool -in $registeredTools) { Add-Fatal "Delivery Control MCP public interface still exposes legacy tool: $legacyTool" }
+    }
+}
+if (Test-Path -LiteralPath (Join-Path $deliveryHooksRoot 'hooks.json') -PathType Leaf) {
+    Add-Fatal 'Delivery Control must not ship an active hooks/hooks.json; only the opt-in template is allowed.'
+}
+if ($deliveryHookTemplate -and $stateMachine) {
+    $templateEvents = @($deliveryHookTemplate.hooks.PSObject.Properties.Name | Sort-Object)
+    $policyEvents = @($stateMachine.delivery_protocol.lifecycle_hooks.events | Sort-Object)
+    if (($templateEvents -join '|') -ne ($policyEvents -join '|')) {
+        Add-Fatal 'Delivery Control lifecycle hook template events differ from the canonical policy.'
+    }
+    foreach ($event in $templateEvents) {
+        $groups = @($deliveryHookTemplate.hooks.PSObject.Properties[$event].Value)
+        if ($groups.Count -eq 0 -or @($groups[0].hooks).Count -eq 0) {
+            Add-Fatal "Delivery Control lifecycle hook template is incomplete for event: $event"
+            continue
+        }
+        $handler = $groups[0].hooks[0]
+        if ([string]$handler.type -ne 'command' -or [string]$handler.command -notmatch 'lifecycle-advisory\.mjs' -or
+            [string]$handler.command -notmatch '<ABSOLUTE-DELIVERY-CONTROL-PLUGIN-ROOT>') {
+            Add-Fatal "Delivery Control lifecycle hook template has an unsafe or non-portable handler for event: $event"
+        }
+    }
+}
+if ($deliveryHookScript) {
+    foreach ($forbidden in @('writeFile', 'appendFile', 'rmSync', 'fetch(', 'http://', 'https://', 'spawn(', 'exec(')) {
+        if ($deliveryHookScript.IndexOf($forbidden, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            Add-Fatal "Delivery Control lifecycle hook must remain a pure advisory transform; found forbidden capability: $forbidden"
+        }
+    }
+    if ($deliveryHookScript -notmatch 'process\.stdout\.write' -or $deliveryHookScript -notmatch 'continue:\s*true') {
+        Add-Fatal 'Delivery Control lifecycle hook must return a non-blocking standard-output response.'
+    }
+}
+if ($deliveryHookReadme -and ($deliveryHookReadme -notmatch '(?i)opt-in' -or $deliveryHookReadme -notmatch '(?i)fallback without hooks')) {
+    Add-Fatal 'Delivery Control lifecycle hook documentation must explain opt-in activation and the no-hook fallback.'
 }
 if ($stateMachine -and $deliveryPolicy) {
     $canonicalPolicy = (Get-Content -LiteralPath $stateMachineFile -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 30 -Compress)
     $bundledPolicy = (Get-Content -LiteralPath $deliveryPolicyFile -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 30 -Compress)
     if ($canonicalPolicy -ne $bundledPolicy) { Add-Fatal 'Generated workflow state-machine.json differs from the canonical Delivery Control policy; run sync-policy.ps1.' }
 }
+if ($deliveryStateSchema -and $stateMachine) {
+    foreach ($field in @('mode', 'policy_id', 'policy_version', 'policy_digest')) {
+        if ($field -notin @($deliveryStateSchema.required)) { Add-Fatal "Generated flow-state schema required field is missing: $field" }
+    }
+    if ([string]$deliveryStateSchema.properties.policy_id.const -ne [string]$stateMachine.policy_id -or
+        [string]$deliveryStateSchema.properties.policy_version.const -ne [string]$stateMachine.schema_version -or
+        [string]$deliveryStateSchema.properties.policy_digest.const -notmatch '^sha256:[0-9a-f]{64}$') {
+        Add-Fatal 'Generated flow-state schema is not pinned to the canonical workflow policy.'
+    }
+    foreach ($mode in @($stateMachine.modes.profiles.PSObject.Properties.Name)) {
+        if ($mode -notin @($deliveryStateSchema.properties.mode.enum)) { Add-Fatal "Generated flow-state schema mode is missing: $mode" }
+    }
+}
 if ($stateMachine) {
     if (-not $stateMachine.delivery_protocol -or -not $stateMachine.host_profiles) {
         Add-Fatal 'Canonical workflow JSON must define delivery_protocol and host_profiles.'
     }
-    foreach ($field in @('authority', 'external_actions', 'evidence_required_fields', 'close_gates', 'host_plan')) {
+    foreach ($field in @('authority', 'external_actions', 'artifact_roots', 'evidence_required_fields', 'close_gates', 'host_plan', 'lifecycle_hooks')) {
         if (-not $stateMachine.delivery_protocol.PSObject.Properties[$field]) { Add-Fatal "Canonical delivery_protocol is missing: $field" }
+    }
+    if ([string]$stateMachine.policy_id -ne [string]$compatibility.policy.policy_id) { Add-Fatal 'Canonical workflow JSON policy_id differs from compatibility contract.' }
+    if ([string]$stateMachine.schema_version -ne [string]$compatibility.policy.minimum_schema_version) { Add-Fatal 'Canonical workflow JSON schema_version differs from compatibility contract.' }
+    if ([string]$stateMachine.delivery_protocol.host_plan.role -ne [string]$compatibility.host_plan.role -or
+        [bool]$stateMachine.delivery_protocol.host_plan.required_for_close) {
+        Add-Fatal 'Canonical workflow JSON must mark host plans advisory and not required for close.'
+    }
+    foreach ($mode in @($compatibility.policy.modes)) {
+        if (-not $stateMachine.modes.profiles.PSObject.Properties[$mode]) { Add-Fatal "Canonical workflow JSON mode is missing: $mode" }
+    }
+    $policyHooks = $stateMachine.delivery_protocol.lifecycle_hooks
+    if ([string]$policyHooks.role -ne 'opt-in-advisory' -or [bool]$policyHooks.writes_state -or
+        @($policyHooks.events).Count -ne 3 -or -not [string]$policyHooks.fallback) {
+        Add-Fatal 'Canonical lifecycle hook policy must be opt-in, non-writing, and define its fallback.'
     }
 }
 if ($hostCapabilities) {
@@ -214,6 +307,11 @@ if ($hostCapabilities) {
     foreach ($agentHost in @('codex', 'claude-code', 'opencode', 'pi', 'dsh', 'zcode')) {
         $profile = $hostCapabilities.hosts.PSObject.Properties[$agentHost]
         if (-not $profile -or -not $profile.Value.support -or -not $profile.Value.adapter) { Add-Fatal "Host capabilities profile is incomplete: $agentHost" }
+    }
+    if ([string]$hostCapabilities.policy_id -ne [string]$stateMachine.policy_id -or
+        [string]$hostCapabilities.schema_version -ne [string]$stateMachine.schema_version -or
+        [string]$hostCapabilities.policy_digest -notmatch '^sha256:[0-9a-f]{64}$') {
+        Add-Fatal 'Host capabilities contract is not pinned to the generated workflow policy.'
     }
 }
 $adapterFiles = @(
@@ -239,7 +337,8 @@ if ($hostCapabilities -and (Test-Path -LiteralPath (Join-Path $AdaptersRoot 'hos
 if ($bridgeToolFile -and (Read-Text $bridgeToolFile 'legacy Plan Tree bridge') -notmatch 'Legacy Plan Tree writes are disabled') { Add-Fatal 'Legacy Plan Tree bridge still exposes a write path.' }
 
 if ($stateMachine) {
-    if ([string]$stateMachine.schema_version -ne '2.0.0') { Add-Fatal 'Unexpected state-machine schema_version.' }
+    if ([string]$stateMachine.schema_version -ne '3.0.0') { Add-Fatal 'Unexpected state-machine schema_version.' }
+    if ([string]::IsNullOrWhiteSpace([string]$stateMachine.policy_id)) { Add-Fatal 'State-machine policy_id is missing.' }
     $expectedFields = @('flow', 'status', 'current_phase', 'next_phase', 'plan_target', 'terminal_condition', 'resume_point')
     foreach ($field in $expectedFields) {
         if ($field -notin @($stateMachine.required_fields)) { Add-Fatal "State-machine required field is missing: $field" }
@@ -277,10 +376,56 @@ if ($stateMachine) {
             Add-Fatal "State-machine event rule is missing: $event"
         }
     }
+    foreach ($phase in @($stateMachine.phases)) {
+        if (-not $stateMachine.phase_labels.PSObject.Properties[$phase] -or [string]::IsNullOrWhiteSpace([string]$stateMachine.phase_labels.$phase)) {
+            Add-Fatal "State-machine phase label is missing: $phase"
+        }
+    }
+    foreach ($mode in @('standard', 'strict')) {
+        $profile = $stateMachine.modes.profiles.PSObject.Properties[$mode]
+        if (-not $profile -or $null -eq $profile.Value.require_lease -or $null -eq $profile.Value.require_fixed_points) {
+            Add-Fatal "State-machine mode profile is incomplete: $mode"
+        }
+    }
+    foreach ($result in @('passed', 'verified', 'accepted', 'observed')) {
+        if ($result -notin @($stateMachine.evidence_results)) { Add-Fatal "State-machine evidence result is missing: $result" }
+    }
+    foreach ($severity in @('P0', 'P1', 'P2', 'P3')) {
+        if ($severity -notin @($stateMachine.review.severities)) { Add-Fatal "State-machine review severity is missing: $severity" }
+    }
 }
 
 if ($compatibility) {
-    if ([string]$compatibility.schema_version -ne '2.0.0') { Add-Fatal 'Unexpected compatibility schema_version.' }
+    if ([string]$compatibility.schema_version -ne '3.0.0') { Add-Fatal 'Unexpected compatibility schema_version.' }
+    if ([string]$compatibility.policy.policy_id -ne 'com.1clipse.policy-driven-delivery-protocol' -or
+        [string]$compatibility.policy.minimum_schema_version -ne '3.0.0' -or
+        [string]$compatibility.policy.authority -ne 'plugins/delivery-control/schemas/workflow-policy.json') {
+        Add-Fatal 'Compatibility contract has an invalid canonical policy identity.'
+    }
+    $publicTools = @($compatibility.delivery_control.public_tools)
+    if ($publicTools.Count -ne 7 -or @($publicTools | Sort-Object -Unique).Count -ne 7) {
+        Add-Fatal 'Compatibility contract must define exactly seven unique public Delivery Control tools.'
+    }
+    foreach ($tool in @('start_or_resume_flow', 'route_flow', 'checkpoint_flow', 'record_evidence', 'authorize_external_action', 'audit_or_recover_flow', 'close_or_cancel_flow')) {
+        if ($tool -notin $publicTools) { Add-Fatal "Compatibility contract public tool is missing: $tool" }
+    }
+    if (@($publicTools | Where-Object { $_ -in @($compatibility.delivery_control.legacy_tools) }).Count -gt 0) {
+        Add-Fatal 'Compatibility contract overlaps public and legacy Delivery Control tools.'
+    }
+    if ([string]$compatibility.host_plan.role -ne 'advisory-runtime-projection' -or [bool]$compatibility.host_plan.required_for_close) {
+        Add-Fatal 'Compatibility contract must keep host plans advisory and outside close gates.'
+    }
+    $compatibilityHooks = $compatibility.lifecycle_hooks
+    if ([string]$compatibilityHooks.role -ne 'opt-in-advisory' -or [bool]$compatibilityHooks.writes_state -or
+        @($compatibilityHooks.events).Count -ne 3 -or -not [string]$compatibilityHooks.fallback) {
+        Add-Fatal 'Compatibility contract must define opt-in, non-writing lifecycle hooks and fallback.'
+    } elseif ($stateMachine) {
+        $policyEvents = @($stateMachine.delivery_protocol.lifecycle_hooks.events | Sort-Object)
+        $compatibilityEvents = @($compatibilityHooks.events | Sort-Object)
+        if (($policyEvents -join '|') -ne ($compatibilityEvents -join '|')) {
+            Add-Fatal 'Compatibility lifecycle hook events differ from the canonical policy.'
+        }
+    }
     if (-not $compatibility.plan_tree.minimum_version) { Add-Fatal 'Compatibility contract is missing Plan Tree minimum_version.' }
     if (-not $compatibility.ask_matt.router_file -or -not $compatibility.ask_matt.phase_boundaries_file) {
         Add-Fatal 'Compatibility contract is missing Ask Matt file boundaries.'
@@ -326,10 +471,14 @@ if ($routeCases) {
 }
 
 if ($nativePlan) {
-    if ([string]$nativePlan.schema_version -ne '2.0.0') { Add-Fatal 'Unexpected native-plan schema_version.' }
-    if ([string]$nativePlan.scope -notmatch 'current-session-only' -or @($nativePlan.handshake).Count -ne 3) {
-        Add-Fatal 'Host-plan contract must define the projection/application/confirmation handshake.'
+    if ([string]$nativePlan.schema_version -ne '3.0.0') { Add-Fatal 'Unexpected native-plan schema_version.' }
+    if ([string]$nativePlan.scope -notmatch 'current-session-only' -or
+        [string]$nativePlan.role -ne 'advisory-runtime-projection' -or
+        [bool]$nativePlan.required_for_close -or
+        [string]$nativePlan.availability -ne 'host-capability-dependent') {
+        Add-Fatal 'Host-plan contract must describe an optional advisory projection.'
     }
+    if (@($nativePlan.legacy_compatibility_tools).Count -ne 2) { Add-Fatal 'Native Plan contract must retain its two legacy compatibility tool names.' }
     if (-not $nativePlan.projection_scope) { Add-Fatal 'Native Plan contract must define projection_scope.' }
     foreach ($phase in @('route', 'setup', 'clarify', 'prototype', 'spec', 'tickets', 'goal', 'execute', 'review', 'close')) {
         if (-not $nativePlan.phase_mapping.PSObject.Properties[$phase]) { Add-Fatal "Native Plan mapping is missing phase: $phase" }

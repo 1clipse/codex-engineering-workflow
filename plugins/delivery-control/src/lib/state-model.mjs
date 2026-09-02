@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
-  EVENT_RULES, FLOW_VALUES, LEGACY_END, LEGACY_START, PHASE_ORDER, PHASE_TRANSITIONS,
+  DEFAULT_MODE, EVENT_RULES, FLOW_VALUES, LEGACY_END, LEGACY_START, MODE_VALUES, PHASE_ORDER, PHASE_TRANSITIONS,
   PHASE_VALUES, REQUIRED_PHASES_BY_FLOW, REQUIRED_PHASE_SKIP_EXCEPTIONS, STATE_END,
-  STATE_START, STATUS_TRANSITIONS, STATUS_VALUES
+  STATE_START, STATUS_TRANSITIONS, STATUS_VALUES, REVIEW_DISPOSITIONS, REVIEW_SEVERITIES
 } from "../constants.mjs";
 import { assertString, canonical, sha256 } from "./primitives.mjs";
 import { routeSequence, skippedPhases } from "./route-policy.mjs";
@@ -14,6 +14,7 @@ export function normalizeState(input) {
     terminal_condition: input.terminal_condition || "legacy-unverified"
   }));
   const fixedPoint = input.fixed_point ?? {};
+  const legacyPolicy = !input.policy_id;
   const state = {
     flow_id: assertString(input.flow_id, "flow_id"),
     revision: Number(input.revision),
@@ -26,6 +27,11 @@ export function normalizeState(input) {
     resume_point: assertString(input.resume_point, "resume_point"),
     delivery_generation: Number(deliveryGeneration),
     scope_digest: scopeDigest,
+    mode: input.mode ?? (legacyPolicy ? "legacy" : DEFAULT_MODE),
+    mode_reason: input.mode_reason ?? (legacyPolicy ? "Imported before policy pinning" : "policy default"),
+    policy_id: input.policy_id ?? "legacy-unverified",
+    policy_version: input.policy_version ?? "legacy",
+    policy_digest: input.policy_digest ?? null,
     fixed_point: {
       generation: Number(fixedPoint.generation ?? deliveryGeneration),
       spec_digest: fixedPoint.spec_digest ?? null,
@@ -52,6 +58,13 @@ export function normalizeState(input) {
   if (state.fixed_point.generation !== state.delivery_generation) throw new Error("fixed_point generation must match delivery_generation");
   for (const [name, digest] of [["scope_digest", state.scope_digest], ...Object.entries(state.fixed_point).filter(([name]) => name !== "generation")]) {
     if (digest !== null && !/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`${name} must be sha256:<64 lowercase hex>`);
+  }
+  if (state.policy_id === "legacy-unverified") {
+    if (state.mode !== "legacy" || state.policy_version !== "legacy" || state.policy_digest !== null) throw new Error("legacy policy state must remain unpinned");
+  } else {
+    if (!MODE_VALUES.includes(state.mode)) throw new Error(`unknown delivery mode: ${state.mode}`);
+    if (!/^\d+\.\d+\.\d+$/.test(state.policy_version)) throw new Error("policy_version must be semantic numeric version text");
+    if (!/^sha256:[0-9a-f]{64}$/.test(state.policy_digest || "")) throw new Error("policy_digest must be sha256:<64 lowercase hex>");
   }
   if (!FLOW_VALUES.includes(state.flow)) throw new Error(`unknown flow: ${state.flow}`);
   if (!STATUS_VALUES.includes(state.status)) throw new Error(`unknown status: ${state.status}`);
@@ -85,8 +98,8 @@ export function normalizeState(input) {
     findingIds.add(finding_id);
     const severity = assertString(finding.severity, "finding severity");
     const disposition = assertString(finding.disposition, "finding disposition");
-    if (!["P0", "P1", "P2", "P3"].includes(severity)) throw new Error(`unknown finding severity: ${severity}`);
-    if (!["open", "fixed", "accepted", "deferred"].includes(disposition)) throw new Error(`unknown finding disposition: ${disposition}`);
+    if (!REVIEW_SEVERITIES.includes(severity)) throw new Error(`unknown finding severity: ${severity}`);
+    if (!REVIEW_DISPOSITIONS.includes(disposition)) throw new Error(`unknown finding disposition: ${disposition}`);
     if (["fixed", "accepted", "deferred"].includes(disposition) && !assertString(finding.reason || finding.reverified_by || "", "finding disposition reason")) throw new Error(`finding ${finding_id} needs a disposition reason`);
     const delivery_generation = Number(finding.delivery_generation ?? state.delivery_generation);
     if (!Number.isInteger(delivery_generation) || delivery_generation < 1) throw new Error("finding delivery_generation must be a positive integer");
@@ -198,6 +211,10 @@ export function parseStateBlock(text) {
   return normalizeState(JSON.parse(raw));
 }
 
+export function controlledStateDigest(state) {
+  return sha256(canonical(normalizeState(state)));
+}
+
 export function parseLegacyBlock(text, target) {
   const starts = count(text, LEGACY_START);
   const ends = count(text, LEGACY_END);
@@ -213,7 +230,8 @@ export function parseLegacyBlock(text, target) {
     next_phase: pairs.next_phase || "none", plan_target: target,
     terminal_condition: pairs.terminal_condition || "Legacy terminal condition requires revalidation",
     resume_point: pairs.resume_point || "Review imported legacy state",
-    acceptance_criteria: [], required_evidence_types: [], plan_sync: "unavailable"
+    acceptance_criteria: [], required_evidence_types: [], plan_sync: "unavailable",
+    mode: "legacy", policy_id: "legacy-unverified", policy_version: "legacy", policy_digest: null
   });
 }
 
@@ -223,6 +241,8 @@ export function publicFlow(row) {
     flow_id: row.flow_id, revision: row.revision, plan_root: row.plan_root, plan_target: row.plan_target,
     flow: row.flow, status: row.status, current_phase: row.current_phase, next_phase: row.next_phase,
     terminal_condition: row.terminal_condition, resume_point: row.resume_point,
+    mode: row.mode || "legacy", mode_reason: row.mode_reason || "Imported before policy pinning",
+    policy_id: row.policy_id || "legacy-unverified", policy_version: row.policy_version || "legacy", policy_digest: row.policy_digest || null,
     delivery_generation: row.delivery_generation ?? 1,
     scope_digest: row.scope_digest,
     fixed_point: JSON.parse(row.fixed_point_json || JSON.stringify({ generation: row.delivery_generation ?? 1, spec_digest: null, implementation_digest: null, review_digest: null })),

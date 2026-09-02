@@ -6,7 +6,7 @@
 
 ## 工作流总览
 
-下面是当前 `engineering-workflow 2.0` 的交付流程总览，展示从需求路由到终态门禁、授权和恢复的完整路径。
+下面是当前流程的交付概览，展示从需求路由到终态门禁、授权和恢复的完整路径。v3 将这个图背后的路线、状态机和门禁收敛到可校验 JSON，而不是长提示词。
 
 [![Engineering Workflow 2.0 交付流程](assets/engineering-workflow-v2-flowchart.visual-check.1440x900.light.png)](assets/engineering-workflow-v2-flowchart.html)
 
@@ -17,33 +17,36 @@
 - 自动判断直接实现、常规交付、复杂决策、UI/UX 和纯计划维护路线。
 - 读取并应用 Ask Matt 的 procedure manual，完成澄清、spec、tickets、goal、TDD 和 review 等阶段。
 - 以 Plan Tree 作为唯一持久业务权威，保存范围、决策、阶段、证据与恢复点。
-- 通过 Delivery Control MCP 管理事务、CAS revision、lease、崩溃恢复、漂移检测和 host-plan 同步或 handoff。
+- 通过 Delivery Control MCP 管理事务、CAS revision、strict lease、崩溃恢复、受控状态块漂移检测和精确授权。
 - 以结构化 evidence、terminal observation、Review disposition 和 terminal condition 作为完成门禁，阶段完成不等于交付完成。
 - 对 commit、push、PR、merge、deploy、生产操作和外部通信采用精确、短期、单次授权。
-- 通过高层入口隐藏普通流程中的 CAS、lease、Plan projection 和 evidence 事务细节。
+- 通过 7 个高层入口隐藏普通流程中的 CAS、lease、journal、固定点和 evidence 事务细节。
 - required phase 由统一策略控制：`spec` 只有在批准的 imported spec 下可跳过，`execute`/`review` 不可静默绕过；scope rework 会复用历史已完成阶段。
 - 每次 scope revision 都创建新的 `delivery_generation` 和 fixed point；旧 spec、实现、Review 与 evidence 继续可审计，但不能关闭新一代交付。
 - Review finding 按 ID 追加或更新，不能通过空列表清除；P0/P1 必须 `fixed` 且有 `reverified_by` 才能关闭。
 - 授权同时保留外部动作 digest 与控制器 mutation digest，旧 SQLite schema 会自动迁移，事务备份保存在专用目录并限制保留数量。
 - 外部动作把“已授权”和“已成功”分开验证：每次授权只允许一个结果，失败重试必须重新授权，并以本地回执 artifact/digest 证明结果。
-- 路线策略、运行时常量、JSON Schema 与 workflow 引用由一个 canonical policy 生成，并由 drift check 阻止副本分叉。
-- 工作流规则不再由长篇 Skill 提示词承载：canonical JSON 定义路线、状态机、权限、证据、终态门禁和宿主能力；各 Agent 文件只负责加载 JSON 与连接控制器。
+- 路线策略、运行时枚举、JSON Schema、适配器能力和 workflow 引用由一个 canonical policy 生成，并由 drift check 阻止副本分叉。
+- 每个 flow 固定 `policy_id`、版本和 digest；升级只能显式迁移，不能静默用新版规则重解释旧交付。
+- 工作流规则不再由长篇 Skill 提示词承载：canonical JSON 定义路线、状态机、权限、证据、终态门禁和宿主能力；各 Agent 文件只负责加载 JSON、理解用户语义并连接控制器。
+- `standard` 用于普通工程交付；声明了外部动作、多 Agent/多宿主、发布、生产或受监管风险时自动升级到 `strict`，不能静默降级。
+- Codex 原生 Plan/Goal 和生命周期 Hook 都是可选会话辅助，不是关闭门禁，也不构成宿主级安全沙箱。
 
 ## 组件关系
 
 | 组件 | 职责 |
 | --- | --- |
-| `engineering-workflow` | 唯一日常入口；自动路由并推进完整交付流程 |
+| `engineering-workflow` | 薄入口；理解需求、选择 JSON 路线并协调交付 |
 | [Ask Matt](https://github.com/tt-a1i/matt-skills-with-to-goal) | 提供具体工程 procedure manuals |
 | [Plan Tree](https://github.com/SeemSeam/plan-tree) | 持久计划、范围、决策、状态、问题与证据的权威来源 |
-| `delivery-control` | 本地事务、锁、恢复、证据、授权、指标和同步控制 |
+| `delivery-control` | 本地策略执行、事务、恢复、证据、授权和指标控制 |
 | Product Design | 可选；处理 UI/UX 设计与设计 QA |
 
 ## Agent 兼容性
 
 | Agent | 支持级别 | 方式 |
 | --- | --- | --- |
-| Codex | 原生 | Skill、Plugin 与 MCP；可确认原生 Plan 投影 |
+| Codex | 原生 | Skill、Plugin 与 MCP；原生 Plan/Goal 只作会话辅助 |
 | Claude Code | 原生 MCP | `.mcp.json` 片段与薄 Skill 入口 |
 | OpenCode | 原生 MCP | `opencode.json` 片段与 Command 入口 |
 | Pi | 本地 Bridge | Pi Skill + TypeScript stdio MCP bridge |
@@ -124,18 +127,43 @@ $plan-tree 更新当前路线图和未决问题
 $delivery-control 审计当前 flow，检查漂移和未满足的验收项
 ```
 
-普通交付优先使用这些高层 MCP 工具：
+普通交付只使用这 7 个高层 MCP 工具：
 
 ```text
 start_or_resume_flow       # 初始化或恢复
-select_route               # 选择控制器内置路线模板
-advance_phase              # 按模板推进并生成 host-plan projection
-revise_scope               # 新建交付代际并清空旧 fixed point
-record_delivery_evidence  # 记录证据并返回当前门禁
-record_review_findings     # 记录 Review disposition
-record_external_action_result # 记录授权动作的成功或失败
-close_flow                 # 通过全部门禁后关闭
+route_flow                 # 选择控制器内置路线模板及 delivery mode
+checkpoint_flow            # 推进阶段、变更范围、显式迁移策略或解决已恢复的漂移
+record_evidence            # 记录交付证据或 Review disposition
+authorize_external_action  # 请求、确认、消费并登记一个精确的外部动作
+audit_or_recover_flow      # 审计一致性或恢复 journal
+close_or_cancel_flow       # 通过全部门禁后关闭，或保留取消后的恢复点
 ```
+
+## 为什么采用 JSON 协议，而不是长提示词
+
+提示词仍然需要存在，但只承担模型擅长的部分：理解自然语言、判断任务路线、指出真正需要用户决定的产品问题。它不再保存状态机、权限规则或完成定义。
+
+| 层 | 真相来源 | 能解决的问题 |
+| --- | --- | --- |
+| 语义层 | 薄 Skill / Agent 指令 | 需求理解、路线判断、澄清问题 |
+| 协议层 | `workflow-policy.json` | 枚举、允许的迁移、严格模式、证据字段、门禁 |
+| 执行层 | Delivery Control | CAS、journal、lease、证据 digest、单次授权、恢复 |
+| 业务层 | Plan Tree | 范围、决策、用户意图、开放问题和证据索引 |
+
+JSON 本身不是安全边界；它必须由控制器校验，才会在模型上下文变长、换 Agent 或发生崩溃时仍然保持同一份规则。普通 Plan Tree 说明文字可以自由编辑，只有控制器管理的状态块参与一致性校验。
+
+## 与 Codex 原生 Plan / Goal 的区别
+
+| 对比项 | Codex 原生 Plan / Goal | Engineering Workflow v3 |
+| --- | --- | --- |
+| 生命周期 | 当前会话或长任务的执行辅助 | 跨会话、跨 Agent 的可恢复交付协议 |
+| 表达方式 | 由当前 Agent 生成的计划步骤 | 版本化 JSON + Plan Tree + 事务控制器 |
+| 权威性 | 宿主运行时视图 | JSON 管规则，Plan Tree 管业务语义 |
+| 完成标准 | 当前任务/目标的宿主状态 | 每个验收项都有有效证据、授权和可观察终态 |
+| 宿主依赖 | Codex 专有 | Codex、Claude Code、OpenCode、Pi、DSH 等可共享 |
+| 失败恢复 | 依赖宿主会话能力 | journal、revision、受控块 digest 和 Plan Tree 重建 |
+
+所以两者是互补关系：在 Codex 中仍然可以用 `/plan` 或 `/goal` 让当前会话更易执行；工作流只把它们投影为可选运行时视图，绝不把“Plan 已完成”当成“交付已完成”。
 
 ## 验证
 

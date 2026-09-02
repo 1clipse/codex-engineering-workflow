@@ -1,46 +1,31 @@
 ---
 name: delivery-control
-description: Audit, recover, authorize, diagnose, synchronize, close, or cancel a transaction-controlled engineering delivery flow. Use manually for workflow status and metrics, or automatically when engineering-workflow detects Plan Tree drift, a crash journal, stale host-plan projection, authorization failure, recovery need, or completion-gate failure. Do not use as the normal feature-delivery router.
+description: Audit, recover, checkpoint, authorize, or close a JSON-policy-controlled engineering delivery flow. Use manually for diagnostics and recovery, or when engineering-workflow detects drift, a journal, authorization failure, or an unmet close gate. Do not use as the normal feature-delivery router.
 ---
 
 # Delivery Control
 
-Operate the local `delivery-control` MCP server. Plan Tree is the durable business authority; SQLite is a rebuildable transaction journal, lease store, authorization ledger, evidence index, and aggregate metrics cache.
+Delivery Control is the local enforcement layer for the canonical JSON policy. Plan Tree owns durable product meaning; SQLite/WAL is a rebuildable transaction journal, lease store, authorization ledger and evidence index.
 
-## Inspect First
+Use the seven public operations only:
 
-Call `inspect_flow`, then `audit_consistency`, before mutation. On a new task, crash, or uncertain handoff, call `recover_flow` with the last known revision and request digest. Supply `plan_root` and `plan_target` only when rebuilding a missing controller record from Plan Tree.
+1. `start_or_resume_flow` — create a policy-pinned flow or recover an interrupted start.
+2. `route_flow` — select the controller-derived route and delivery mode.
+3. `checkpoint_flow` — progress a phase, record a scope change, migrate policy explicitly, or resolve restored drift.
+4. `record_evidence` — record delivery evidence or review dispositions.
+5. `authorize_external_action` — request, confirm, consume, and record one exact external action.
+6. `audit_or_recover_flow` — inspect consistency or reconcile a journal.
+7. `close_or_cancel_flow` — close with verified evidence or preserve an explicit cancellation.
 
-Every write call requires the current `flow_id`, `expected_revision`, and a SHA-256 digest of the exact normalized request. A revision conflict means another writer won; inspect again and do not retry stale content. A frozen flow requires a drift report and user-owned resolution before any further write.
+## Rules
 
-The external action digest in an authorization is separate from the controller mutation digest used to journal the authorization request, confirmation, and consumption. Receipts retain both digests. A scope revision creates a new delivery generation and clears its fixed point; older evidence and Review remain auditable but cannot close the new generation.
+- Audit before mutation when resuming, after a crash, or when a handoff is uncertain. A stale revision means another writer won; inspect again rather than replaying a write.
+- A `standard` flow stays lightweight. Declared external actions, multi-agent/multi-host work, releases, production work, or regulated work auto-escalate to `strict`; strict cannot be silently downgraded.
+- Each flow pins `policy_id`, version and digest. A different policy requires `checkpoint_flow` with the explicit `migrate-policy` confirmation.
+- Only the controller-owned state block is compared for drift. Normal Plan Tree prose can change safely; malformed or changed controlled state freezes the flow rather than being overwritten.
+- Evidence artifacts must remain inside `plan_root`, must exist, and must match their SHA-256 digest. Agent claims, native host-plan status and phase completion never substitute for evidence.
+- A native host plan or goal is an advisory session aid. Its absence does not block delivery or closure.
+- Every controlled external effect requires an exact, short-lived, single-use authorization bound to action, target, environment and request digest. It does not grant the effect itself.
+- `close_or_cancel_flow` is the only completion path. If it returns `unmet_criteria`, preserve the non-terminal state and report the smallest remaining gate.
 
-For ordinary progression prefer `start_or_resume_flow`, `select_route`, `advance_phase`, `revise_scope`, `record_delivery_evidence`, `record_review_findings`, `record_external_action_result`, and `close_flow`. The controller derives route order and `next_phase`; low-level transition proposals and commits remain internal.
-
-After the user confirms that the original Plan Tree was restored, call `resolve_drift` with `resolution: "accept-restored-plan-tree"` and a concrete reason. The tool clears the frozen marker only when the file digest equals the controller digest, no pending journal transaction remains, and the restored state block matches the controller revision.
-
-## Diagnose And Recover
-
-- `prepared` with the original Plan Tree digest rolls back.
-- A projected digest completes the interrupted database commit.
-- An unrelated digest freezes the flow as `awaiting-user`; report both expected digests and the actual digest.
-- Missing SQLite state rebuilds from exactly one valid Plan Tree state block.
-- Plan Tree wins any authority conflict, but drift is never silently accepted or overwritten.
-
-Do not hand-edit the controlled state block. Do not use the legacy PowerShell bridge to write state.
-
-## Authorization
-
-Use `request_authorization` only for commit, push, pull request, merge, deploy, tracker write, production data, credential access, external message, or costly real-service calls. Authorization binds action, target, environment, the exact external-action digest, a separate controller mutation digest, expiry, and nonce.
-
-When structured elicitation succeeds, the server confirms the request. Otherwise show the returned challenge code to the user and call `confirm_authorization` only after the user returns that exact code in a later message. Call `consume_authorization` immediately before the exact action. After it runs, write a redacted local result receipt and call `record_external_action_result` with its artifact digest and command/request ID. One authorization proves exactly one attempt; record failures honestly and obtain fresh authorization before retrying. A changed request, generation, expired receipt, scope mismatch, or replay fails closed. Host action-time permission checks still apply.
-
-## Host Plan And Completion
-
-Use `project_native_plan`, apply its exact steps through the active host's equivalent plan feature, then call `confirm_native_plan` with the applied steps. When no equivalent is available, record `available: false` and a concrete handoff; never claim synchronization.
-
-Record evidence through `record_delivery_evidence` or `validate_evidence`. Each item must bind one or more acceptance IDs, the current delivery generation and subject fixed point, and a real artifact digest. Review findings must bind the current implementation fixed point, have an explicit disposition, cannot be silently deleted, and fixed P0/P1 findings require a re-verifier. Use `close_flow` only after a terminal observation references a current valid evidence record with the same artifact and digest. If it returns `unmet_criteria`, preserve the non-terminal state and report only the smallest remaining gate.
-
-External action declarations include `request_digest`; completion requires both a consumed receipt and a successful, current-generation action result whose authorization ID, action, target, environment, and request digest all match exactly. The result's local receipt artifact must still exist and match its digest. Relative artifacts are resolved against the flow's `plan_root` before they are stored or checked.
-
-Use `get_metrics` for redacted aggregate counts. Use `cancel_flow` only for an explicit user cancellation; it preserves all recovery state.
+Do not hand-edit the controlled state block. Do not treat hooks as a security sandbox. If the controller is unavailable, preserve a Plan Tree handoff and do not claim a verified completion.

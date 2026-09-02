@@ -1,5 +1,6 @@
 {
-  "schema_version": "2.0.0",
+  "policy_id": "com.1clipse.policy-driven-delivery-protocol",
+  "schema_version": "3.0.0",
   "required_fields": [
     "flow",
     "status",
@@ -29,6 +30,9 @@
       "external-message",
       "costly-service-call"
     ],
+    "artifact_roots": [
+      "plan_root"
+    ],
     "evidence_required_fields": [
       "evidence_id",
       "acceptance_ids",
@@ -50,15 +54,78 @@
       "review-disposition",
       "external-action-results",
       "plan-tree-consistency",
-      "host-plan-or-handoff",
       "terminal-observation"
     ],
     "host_plan": {
       "projection_tool": "project_native_plan",
       "confirmation_tool": "confirm_native_plan",
       "fallback": "plan_sync unavailable with explicit handoff",
-      "legacy_tool_names": true
+      "legacy_tool_names": true,
+      "role": "advisory-runtime-projection",
+      "required_for_close": false
+    },
+    "lifecycle_hooks": {
+      "role": "opt-in-advisory",
+      "events": [
+        "SessionStart",
+        "PreCompact",
+        "Stop"
+      ],
+      "writes_state": false,
+      "fallback": "manual audit/recover, handoff checkpoint, and close gate"
     }
+  },
+  "modes": {
+    "default": "standard",
+    "strict_escalation_signals": [
+      "external-action",
+      "multi-agent",
+      "multi-host",
+      "release",
+      "production",
+      "regulated"
+    ],
+    "profiles": {
+      "standard": {
+        "description": "Ordinary scoped engineering: durable route, acceptance evidence, review phase, and terminal observation without native-plan gating.",
+        "require_lease": false,
+        "require_fixed_points": false,
+        "require_review_dispositions": true,
+        "allow_downgrade": false
+      },
+      "strict": {
+        "description": "Multi-writer, release, production, regulated, or externally-effectful delivery: all standard gates plus leases, fixed points, authorization, and recovery audit.",
+        "require_lease": true,
+        "require_fixed_points": true,
+        "require_review_dispositions": true,
+        "allow_downgrade": false
+      }
+    }
+  },
+  "evidence_results": [
+    "passed",
+    "verified",
+    "accepted",
+    "observed"
+  ],
+  "review": {
+    "severities": [
+      "P0",
+      "P1",
+      "P2",
+      "P3"
+    ],
+    "dispositions": [
+      "open",
+      "fixed",
+      "accepted",
+      "deferred"
+    ],
+    "fixed_point_phases": [
+      "spec",
+      "execute",
+      "review"
+    ]
   },
   "flows": [
     "main",
@@ -89,6 +156,18 @@
     "review",
     "close"
   ],
+  "phase_labels": {
+    "route": "Inspect context and choose the delivery route",
+    "setup": "Prepare route-required local configuration",
+    "clarify": "Resolve the smallest user-owned uncertainty",
+    "prototype": "Produce runnable evidence for an open question",
+    "spec": "Lock scope, approach, acceptance, verification, dependencies, and risks",
+    "tickets": "Split durable work into explicit frontier tickets",
+    "goal": "Compile the selected frontier into a verifiable goal",
+    "execute": "Implement the approved contract and capture evidence",
+    "review": "Review against the recorded fixed point and resolve findings",
+    "close": "Verify the terminal condition and report final state"
+  },
   "phase_order": [
     "route",
     "setup",

@@ -1,24 +1,35 @@
 ---
 name: engineering-workflow
-description: Route non-trivial repository delivery through the canonical JSON contract, Plan Tree, and Delivery Control. Use plan-tree directly for planning-only maintenance and Product Design directly for design-only exploration.
+description: Route non-trivial repository delivery through the versioned JSON policy, Plan Tree, and Delivery Control. Use plan-tree directly for planning-only maintenance and Product Design directly for design-only exploration.
 ---
 
 # Engineering Workflow Loader
 
-`references/state-machine.json` is the generated copy of the canonical workflow definition at `plugins/delivery-control/schemas/workflow-policy.json`. JSON is authoritative for route templates, state transitions, authority boundaries, evidence, completion gates and host capabilities. This file is only the host bootstrap.
+This is a thin host bootstrap, not the workflow specification. The canonical, versioned contract is [`references/state-machine.json`](references/state-machine.json), generated from `plugins/delivery-control/schemas/workflow-policy.json`.
 
-## Bootstrap
+## Authority and roles
 
-1. Read the canonical JSON definition and `references/host-capabilities.json`.
-2. Inspect repository instructions, Plan Tree, Git state and the active flow. Plan Tree owns durable business state.
-3. Select one listed flow. If task intent cannot establish the route with high confidence, keep the flow `awaiting-user` and request the smallest decision.
-4. Start or resume through `delivery-control`; use only its high-level operations for durable state.
-5. Apply an installed Ask Matt procedure only for the selected phase. Product Design remains a focused UI/UX procedure, not a second delivery state machine.
+- **JSON policy + Delivery Control**: machine-checked routes, transitions, delivery modes, evidence gates, policy pinning, recovery and external-action authorization.
+- **Plan Tree**: durable product intent, scope, decisions, open questions and links to evidence. Its normal prose remains human-editable.
+- **Host plan / goal**: optional, session-scoped thinking and execution view. It is never a transition or close gate.
+- **This loader**: minimal semantic judgment—understand the request, choose a policy route, and request a genuinely user-owned decision.
 
-## Boundary Execution
+Do not copy the JSON state machine into a long prompt. Read the policy, use the controller, and keep any host-specific instructions short.
 
-For every boundary, record Plan Tree decisions and evidence first; then call `advance_phase`. Ask `project_native_plan` for a host-plan projection. Confirm only an equivalent plan actually applied by the active host. Otherwise call `confirm_native_plan` with `available: false` and a concrete handoff.
+## Normal delivery path
 
-Do not report `complete` until `close_flow` passes every JSON-defined gate. The controller rejects invalid phase arithmetic, stale revisions, missing evidence, unresolved Review findings, unauthorized external actions and inconsistent Plan Tree state.
+1. Read the policy, relevant Plan Tree state, repository instructions, and current Git state.
+2. Call `audit_or_recover_flow` with `kind: "audit"`; if no flow exists, call `start_or_resume_flow`. If recovery is needed, use `kind: "recover"` before making a write.
+3. Call `route_flow`. It derives phase order and automatically escalates to `strict` for declared external action, multi-agent, multi-host, release, production, or regulated work. Do not silently downgrade a strict flow.
+4. At each meaningful boundary, update the Plan Tree decision/evidence and call `checkpoint_flow` or `record_evidence`. The controller owns state arithmetic and rejects stale revisions.
+5. Use the host's native `/plan` or `/goal` only when it makes the current session easier to execute. Record `plan_sync: unavailable` and a concrete handoff when the host has no equivalent; continue from Plan Tree rather than blocking delivery.
+6. Use `authorize_external_action` for an exact, short-lived, single-use authorization before every controlled external effect. This workflow does not grant commit, push, PR, deploy, tracker-write, production-data, credential, message, or costly-service authority.
+7. Call `close_or_cancel_flow` only after evidence is registered. `close` reports structured unmet criteria until every policy gate and observable terminal condition pass.
 
-External effects remain user-authorized: the JSON definition lists controlled action classes, while `request_authorization`, `consume_authorization` and `record_external_action_result` bind each exact attempt. No host bootstrap grants external authority.
+## Procedure selection
+
+After routing, read and apply the selected Ask Matt procedure manual for that phase when it is installed. Product Design is a focused design procedure, not a second state machine. Do not claim that an opt-in user Skill was automatically invoked when it was only read and applied.
+
+## Safe fallback
+
+If Delivery Control is unavailable, keep work in Plan Tree, state the missing controller capability and a concrete resume point, and do not report `complete` based solely on a host plan or agent assertion.

@@ -34,6 +34,9 @@ try {
     $route = Write-State 'route' @{ flow='main'; status='active'; current_phase='route'; next_phase='execute'; plan_target='plan-1'; terminal_condition='tests pass'; resume_point='none' }
     Assert-Case 'legal route advance' (Invoke-State 'legal route advance' $route 'advance') 0 'PASS: workflow state is valid'
 
+    $wrongPolicy = Write-State 'wrong-policy' @{ flow='main'; status='active'; current_phase='route'; next_phase='execute'; plan_target='plan-1'; terminal_condition='tests pass'; resume_point='none'; mode='standard'; policy_id='wrong-policy'; policy_version='3.0.0'; policy_digest=('sha256:' + ('0' * 64)) }
+    Assert-Case 'policy-pinned state rejects wrong policy' (Invoke-State 'policy-pinned state rejects wrong policy' $wrongPolicy 'advance') 1 'State policy_id'
+
     $execute = Write-State 'execute' @{ flow='main'; status='active'; current_phase='execute'; next_phase='review'; plan_target='plan-1'; terminal_condition='tests pass'; resume_point='test receipt pending' }
     Assert-Case 'legal execute transition' (Invoke-State 'legal execute transition' $execute 'advance' $route) 0 'PASS: workflow state is valid'
 

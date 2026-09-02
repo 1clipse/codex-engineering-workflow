@@ -1,8 +1,11 @@
 {
-  "schema_version": "2.0.0",
+  "schema_version": "3.0.0",
   "authority": "Plan Tree",
-  "scope": "Host-native task plan is current-session-only",
-  "projection_scope": "current phase plus all remaining non-skipped phases through close",
+  "scope": "Host-native task plan is current-session-only and optional",
+  "role": "advisory-runtime-projection",
+  "required_for_close": false,
+  "availability": "host-capability-dependent",
+  "projection_scope": "current phase plus remaining non-skipped phases through close",
   "phase_mapping": {
     "route": "Inspect context and choose the delivery route",
     "setup": "Prepare route-required local configuration",
@@ -15,13 +18,12 @@
     "review": "Review against the recorded fixed point and resolve findings",
     "close": "Verify the terminal condition and report final state"
   },
-  "handshake": ["project_native_plan", "apply host plan when supported", "confirm_native_plan"],
-  "required_projection_fields": ["projection_id", "projection_revision", "flow_id", "flow_revision", "digest", "steps"],
+  "legacy_compatibility_tools": ["project_native_plan", "confirm_native_plan"],
   "rules": [
-    "A phase transition requires a confirmed host-plan projection revision when the host supports it.",
+    "Use a host-native plan or goal only when the active host supports an equivalent session feature.",
     "Projection includes the remaining route, not only the current and next phase.",
-    "A stale or mismatched confirmation is rejected.",
-    "When a host plan is unavailable, record plan_sync unavailable with an explicit handoff.",
-    "Host-plan completion is not a delivery receipt."
+    "Plan Tree and Delivery Control remain authoritative when a host plan is unavailable, stale, or omitted.",
+    "Record plan_sync unavailable with an explicit handoff when the host lacks an equivalent feature.",
+    "Host-plan completion is not delivery evidence and never satisfies a close gate."
   ]
 }

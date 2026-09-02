@@ -9,6 +9,8 @@ export function migrateDatabase(db) {
       flow_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, plan_root TEXT NOT NULL, plan_target TEXT NOT NULL,
       flow TEXT NOT NULL, status TEXT NOT NULL, current_phase TEXT NOT NULL, next_phase TEXT NOT NULL,
       terminal_condition TEXT NOT NULL, resume_point TEXT NOT NULL, plan_tree_digest TEXT NOT NULL,
+      state_digest TEXT, mode TEXT NOT NULL DEFAULT 'legacy', mode_reason TEXT NOT NULL DEFAULT 'Imported before policy pinning',
+      policy_id TEXT NOT NULL DEFAULT 'legacy-unverified', policy_version TEXT NOT NULL DEFAULT 'legacy', policy_digest TEXT,
       native_plan_digest TEXT, plan_sync TEXT NOT NULL DEFAULT 'pending', frozen INTEGER NOT NULL DEFAULT 0,
       drift_report TEXT, route_json TEXT, acceptance_json TEXT NOT NULL DEFAULT '[]', required_types_json TEXT NOT NULL DEFAULT '[]',
       external_actions_json TEXT NOT NULL DEFAULT '[]', gate_json TEXT NOT NULL DEFAULT '{"review_findings":[],"terminal_observation":null}', correlation_id TEXT, receipt_digest TEXT,
@@ -80,6 +82,17 @@ export function migrateDatabase(db) {
     for (const [name, definition] of [["artifact", "TEXT"], ["artifact_digest", "TEXT"], ["command_or_request_id", "TEXT"], ["legacy_unverified", "INTEGER NOT NULL DEFAULT 1"]]) {
       if (!resultColumns.has(name)) db.exec(`ALTER TABLE external_action_results ADD COLUMN ${name} ${definition}`);
     }
+  }
+  if (version < 6) {
+    const flowColumns = new Set(db.prepare("PRAGMA table_info(flows)").all().map((column) => column.name));
+    for (const [name, definition] of [
+      ["state_digest", "TEXT"],
+      ["mode", "TEXT NOT NULL DEFAULT 'legacy'"],
+      ["mode_reason", "TEXT NOT NULL DEFAULT 'Imported before policy pinning'"],
+      ["policy_id", "TEXT NOT NULL DEFAULT 'legacy-unverified'"],
+      ["policy_version", "TEXT NOT NULL DEFAULT 'legacy'"],
+      ["policy_digest", "TEXT"]
+    ]) if (!flowColumns.has(name)) db.exec(`ALTER TABLE flows ADD COLUMN ${name} ${definition}`);
   }
   db.prepare("UPDATE schema_meta SET version=?").run(SCHEMA_VERSION);
   const migratedVersion = db.prepare("SELECT version FROM schema_meta").get().version;

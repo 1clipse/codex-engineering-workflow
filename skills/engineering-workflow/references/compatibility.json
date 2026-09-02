@@ -1,9 +1,56 @@
 {
-  "schema_version": "2.0.0",
+  "schema_version": "3.0.0",
+  "policy": {
+    "policy_id": "com.1clipse.policy-driven-delivery-protocol",
+    "minimum_schema_version": "3.0.0",
+    "authority": "plugins/delivery-control/schemas/workflow-policy.json",
+    "generated_state_machine": "references/state-machine.json",
+    "modes": ["standard", "strict"]
+  },
   "delivery_control": {
-    "minimum_version": "2.0.0",
+    "minimum_version": "3.0.0",
     "plugin_name": "delivery-control",
-    "required_tools": ["initialize_flow", "start_or_resume_flow", "inspect_flow", "select_route", "advance_phase", "revise_scope", "recover_flow", "project_native_plan", "confirm_native_plan", "validate_evidence", "record_delivery_evidence", "record_review_findings", "record_external_action_result", "request_authorization", "confirm_authorization", "consume_authorization", "audit_consistency", "get_metrics", "close_flow", "cancel_flow"]
+    "public_tools": [
+      "start_or_resume_flow",
+      "route_flow",
+      "checkpoint_flow",
+      "record_evidence",
+      "authorize_external_action",
+      "audit_or_recover_flow",
+      "close_or_cancel_flow"
+    ],
+    "legacy_tools": [
+      "initialize_flow",
+      "inspect_flow",
+      "select_route",
+      "advance_phase",
+      "revise_scope",
+      "recover_flow",
+      "project_native_plan",
+      "confirm_native_plan",
+      "validate_evidence",
+      "record_delivery_evidence",
+      "record_review_findings",
+      "record_external_action_result",
+      "request_authorization",
+      "confirm_authorization",
+      "consume_authorization",
+      "audit_consistency",
+      "get_metrics",
+      "close_flow",
+      "cancel_flow"
+    ]
+  },
+  "host_plan": {
+    "role": "advisory-runtime-projection",
+    "required_for_close": false,
+    "fallback": "plan_sync unavailable with explicit handoff"
+  },
+  "lifecycle_hooks": {
+    "role": "opt-in-advisory",
+    "events": ["SessionStart", "PreCompact", "Stop"],
+    "writes_state": false,
+    "fallback": "manual audit/recover, handoff checkpoint, and close gate"
   },
   "host_capabilities_file": "references/host-capabilities.json",
   "plan_tree": {
@@ -23,12 +70,13 @@
     "required_skills": [
       "user-context",
       "get-context",
+      "research",
       "audit",
       "ideate",
-      "prototype",
       "image-to-code",
       "url-to-code",
-      "design-qa"
+      "design-qa",
+      "share"
     ]
   }
 }

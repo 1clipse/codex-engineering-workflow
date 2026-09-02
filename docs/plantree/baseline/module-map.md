@@ -2,8 +2,10 @@
 
 | Key | Surface | Responsibility |
 | --- | --- | --- |
-| workflow | `skills/engineering-workflow/` | Routing, procedure selection and delivery contract |
-| controller | `plugins/delivery-control/src/` | Flow state, transactions, recovery, gates and MCP handlers |
-| policy | Delivery Control policy plus generated assets | Route templates, phases, schemas and runtime constants |
-| packaging | Plugin manifest, bundle and marketplace installation | Codex discovery and local runtime activation |
-| verification | JavaScript and PowerShell tests | Public behavior, compatibility and packaging evidence |
+| workflow | `skills/engineering-workflow/` | Thin host bootstrap, routing context and semantic judgement; it does not duplicate the policy contract |
+| controller | `plugins/delivery-control/src/` | Deterministic flow validation, transactions, recovery, close gates and MCP handlers |
+| policy | `plugins/delivery-control/schemas/workflow-policy.json` and generated assets | Versioned source for routes, profiles, phases, schemas and runtime constants; generated copies are derived only |
+| adapters | `adapters/` | Thin, host-specific MCP/bootstrap configuration with capability-gated fallbacks |
+| hooks | `plugins/delivery-control/hooks/` when installed | Optional lifecycle reminders and diagnostics; never an approval or sandbox bypass |
+| packaging | Plugin manifest, bundle and marketplace installation | Discovery and local runtime activation without remote workflow state |
+| verification | JavaScript and PowerShell tests | Policy generation, public behavior, compatibility, recovery and packaging evidence |

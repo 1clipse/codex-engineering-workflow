@@ -35,8 +35,11 @@ try {
         schema_version = [string]$mapping.schema_version
         authority = [string]$mapping.authority
         scope = [string]$mapping.scope
+        role = [string]$mapping.role
+        required_for_close = [bool]$mapping.required_for_close
+        availability = [string]$mapping.availability
         projection_scope = [string]$mapping.projection_scope
-        handshake = @($mapping.handshake)
+        legacy_compatibility_tools = @($mapping.legacy_compatibility_tools)
         workflow = [ordered]@{ flow = [string]$state.flow; status = [string]$state.status; current_phase = [string]$state.current_phase; next_phase = [string]$state.next_phase; plan_target = [string]$state.plan_target; terminal_condition = [string]$state.terminal_condition; resume_point = [string]$state.resume_point }
         steps = $steps
         generated_at_utc = [DateTime]::UtcNow.ToString('o')

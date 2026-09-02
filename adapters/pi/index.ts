@@ -11,7 +11,7 @@ async function connect(projectRoot: string) {
   if (client) return client;
   const serverPath = resolve(process.env.DELIVERY_CONTROL_SERVER ?? join(projectRoot, "plugins", "delivery-control", "dist", "server.mjs"));
   if (!existsSync(serverPath)) throw new Error(`Delivery Control server was not found: ${serverPath}`);
-  client = new Client({ name: "delivery-control-pi-bridge", version: "2.0.0" });
+  client = new Client({ name: "delivery-control-pi-bridge", version: "3.0.0" });
   await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], cwd: projectRoot }));
   return client;
 }

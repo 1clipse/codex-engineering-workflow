@@ -1,0 +1,46 @@
+{
+  "description": "Optional, advisory-only Delivery Control lifecycle reminders. Replace <ABSOLUTE-DELIVERY-CONTROL-PLUGIN-ROOT> before enabling.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"<ABSOLUTE-DELIVERY-CONTROL-PLUGIN-ROOT>/hooks/lifecycle-advisory.mjs\"",
+            "timeout": 5,
+            "statusMessage": "Loading delivery-flow guidance",
+            "additionalContextLimit": 1200
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "^(manual|auto)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"<ABSOLUTE-DELIVERY-CONTROL-PLUGIN-ROOT>/hooks/lifecycle-advisory.mjs\"",
+            "timeout": 5,
+            "statusMessage": "Preserving delivery-flow handoff guidance",
+            "additionalContextLimit": 1200
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"<ABSOLUTE-DELIVERY-CONTROL-PLUGIN-ROOT>/hooks/lifecycle-advisory.mjs\"",
+            "timeout": 5,
+            "statusMessage": "Checking delivery-flow close guidance",
+            "additionalContextLimit": 1200
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "delivery-control",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Local transactional delivery control for JSON-defined engineering workflows.",
   "author": {
     "name": "1clipse",
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Delivery Control",
     "shortDescription": "Audit, recover, authorize, and close delivery flows",
-    "longDescription": "Adds a local-only MCP controller for Plan Tree transactions, crash recovery, scoped authorization, evidence gates, and host-plan synchronization or handoff.",
+    "longDescription": "Adds a local-only policy controller for Plan Tree transactions, crash recovery, scoped authorization, evidence gates, and optional host-plan advisories.",
     "developerName": "1clipse",
     "category": "Productivity",
     "capabilities": [
